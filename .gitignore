@@ -1,0 +1,218 @@
+# ============================================================================
+# GMIC Federated Learning Project .gitignore
+# ============================================================================
+
+# ============================================================================
+# Data Files and Medical Images (IMPORTANT: Keep medical data private!)
+# ============================================================================
+
+# Real (not sample) data
+data/
+
+# ============================================================================
+# NVFLARE Specific
+# ============================================================================
+# NVFLARE simulator workspaces
+*simulator_workspace*/
+
+# NVFLARE certificates and configs
+*.crt
+*.key
+*.pem
+cert/
+certificates/
+
+# ============================================================================
+# Machine Learning Models
+# ============================================================================
+# Model weights and checkpoints
+gmic_results/
+
+# Training logs and metrics
+logs/
+runs/
+tb_logs/
+tensorboard/
+wandb/
+mlruns/
+
+# ============================================================================
+# Python
+# ============================================================================
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# PyInstaller
+*.manifest
+*.spec
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Virtual environments
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+conda-env/
+miniconda/
+anaconda/
+
+# Environment variables
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# ============================================================================
+# IDE and Editors
+# ============================================================================
+# VSCode
+.vscode/
+*.code-workspace
+
+# PyCharm
+.idea/
+*.iml
+*.ipr
+*.iws
+
+# Sublime Text
+*.sublime-project
+*.sublime-workspace
+
+# Vim
+*.swp
+*.swo
+*~
+
+# Emacs
+*~
+\#*\#
+/.emacs.desktop
+/.emacs.desktop.lock
+*.elc
+auto-save-list
+tramp
+.\#*
+
+# ============================================================================
+# Operating System
+# ============================================================================
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon?
+._*
+.DocumentRevisions-V100
+.fseventsd
+.Spotlight-V100
+.TemporaryItems
+.Trashes
+.VolumeIcon.icns
+.com.apple.timemachine.donotpresent
+
+# Windows
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+ehthumbs_vista.db
+*.stackdump
+[Dd]esktop.ini
+$RECYCLE.BIN/
+*.cab
+*.msi
+*.msix
+*.msm
+*.msp
+*.lnk
+
+# Linux
+*~
+.fuse_hidden*
+.directory
+.Trash-*
+.nfs*
+
+# ============================================================================
+# Docker
+# ============================================================================
+# Docker volumes and data
+docker-compose.override.yml
+.docker/
+Dockerfile.local
+.dockerignore.local
+
+# ============================================================================
+# Temporary and Cache Files
+# ============================================================================
+# Temporary files
+tmp/
+temp/
+*.tmp
+*.temp
+*.bak
+*.backup
+*.old
+*.orig
+
+# Cache directories
+.cache/
+cache/
+*.cache
+
+# ============================================================================
+# Configuration and Secrets
+# ============================================================================
+# Local configuration files
+config.local.json
+settings.local.py
+local_settings.py
+secrets.json
+.secrets
+
+# ============================================================================
+# Large Files (use Git LFS for these if needed)
+# ============================================================================
+# Any file larger than 100MB should probably use Git LFS
+*.zip
+*.tar.gz
+*.tar.bz2
+*.rar
+*.7z
+
+# ============================================================================
+# Keep These Important Files (explicitly include if needed)
+# ============================================================================
+# !important_config.json
+# !requirements.txt
+# !README.md
+# !LICENSE
+# !docker-compose.yml
+# !Dockerfile
