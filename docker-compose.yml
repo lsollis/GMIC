@@ -3,21 +3,30 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: gmic-fl-nvflare
     container_name: gmic_fl_container
     volumes:
-      - /mnt/srl-oahu-1/disk/home/lsollis/GMIC-FL:/workspace
-      - /mnt/srl-oahu-1/disk/home/lsollis/data/XAI_output:/workspace/data/XAI_output
-      - /mnt/srl-oahu-1/disk/home/lsollis/data/snapshots:/workspace/snapshots
+      - /home/lsollis/Documents/GitHub/GMIC:/workspace
+      - /home/lsollis/Downloads/XAI_output:/workspace/data/XAI_output
       # Optional mounts for demo/testing - enable as needed
       # - ../GMIC-mods/data:/workspace/data
       # - ../GMIC-mods/demo/input_metadata.csv:/workspace/demo/input_metadata.csv
     ports:
-      - "8888:8888"   # Jupyter Notebook (optional)
-      - "5000:5000"   # Optional: FL API / Flask
+      - "8887:8887"   # Jupyter Notebook (optional)
+      - "8102:8102"   # FL API
+      - "8103:8103"   # Admin API
+      - "8443:8443"   # Overseer API
+      #- "5000:5000"   # Optional: FL API / Flask
     shm_size: "32gb"
     runtime: nvidia               # Required for GPU access
     environment:
       - NVIDIA_VISIBLE_DEVICES=all
     stdin_open: true              # Keep stdin open for interaction
     tty: true                     # Allocate pseudo-TTY for shell
+    #dns:
+      #- 8.8.8.8
+      #- 1.1.1.1
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider https://security.ubuntu.com || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 5

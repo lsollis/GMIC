@@ -134,7 +134,9 @@ def run_model(model, exam_list, parameters, turn_on_visualization):
     Run the model over images in sample_data.
     Save the predictions as csv and visualizations as png.
     """
-    if (parameters["device_type"] == "gpu") and torch.has_cudnn:
+    # update cuda code
+    # if (parameters["device_type"] == "gpu") and torch.has_cudnn:
+    if parameters["device_type"] == "gpu" and torch.cuda.is_available():
         device = torch.device("cuda:{}".format(parameters["gpu_number"]))
     else:
         device = torch.device("cpu")

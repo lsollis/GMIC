@@ -8,6 +8,9 @@
 
 # Real (not sample) data
 data/
+processed_data/
+data_prep.ipynb
+models/converted_data.pkl
 
 # ============================================================================
 # NVFLARE Specific

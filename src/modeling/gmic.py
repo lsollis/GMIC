@@ -58,6 +58,28 @@ class GMIC(nn.Module):
         # fusion branch
         self.fusion_dnn = nn.Linear(parameters["post_processing_dim"]+512, parameters["num_classes"])
 
+    @property
+    def global_backbone(self):
+        # try to return nested backbone if defined by GlobalNetwork
+        return getattr(self.global_network, "backbone", self.global_network)
+
+    @property
+    def local_backbone(self):
+        return getattr(self.local_network, "backbone", self.local_network)
+
+    @property
+    def global_1x1_and_post(self):
+        # optional head for global network if it exists
+        return getattr(self.global_network, "head", None)
+
+    @property
+    def mil_attention_block(self):
+        return self.attention_module
+
+    @property
+    def classifier_heads(self):
+        return self.fusion_dnn
+
     def _convert_crop_position(self, crops_x_small, cam_size, x_original):
         """
         Function that converts the crop locations from cam_size to x_original
@@ -97,7 +119,9 @@ class GMIC(nn.Module):
         output = torch.ones((batch_size, num_crops, crop_h, crop_w))
         if self.experiment_parameters["device_type"] == "gpu":
             device = torch.device("cuda:{}".format(self.experiment_parameters["gpu_number"]))
-            output = output.cuda().to(device)
+            # fix legacy code: remove cuda reference
+            # output = output.cuda().to(device)
+            output = output.to(device)
         for i in range(batch_size):
             for j in range(num_crops):
                 tools.crop_pytorch(x_original_pytorch[i, 0, :, :],
@@ -112,6 +136,22 @@ class GMIC(nn.Module):
         """
         :param x_original: N,H,W,C numpy matrix
         """
+        # Accept numpy N,H,W,C or torch N,C,H,W (or N,H,W,C); normalize to torch N,C,H,W
+        if isinstance(x_original, np.ndarray):
+            x_original = torch.from_numpy(x_original).permute(0, 3, 1, 2).float()
+        elif isinstance(x_original, torch.Tensor):
+            if x_original.dim() == 3:
+                x_original = x_original.unsqueeze(0)  # 1,C,H,W or 1,H,W,C
+            if x_original.size(1) not in (1, 3):      # looks like N,H,W,C
+                x_original = x_original.permute(0, 3, 1, 2).contiguous()
+        else:
+            raise TypeError("x_original must be numpy array or torch.Tensor")
+
+        # device
+        if self.experiment_parameters.get("device_type", "cpu") == "gpu":
+            device = torch.device(f"cuda:{self.experiment_parameters.get('gpu_number', 0)}")
+            x_original = x_original.to(device)
+
         # global network: x_small -> class activation map
         h_g, self.saliency_map = self.global_network.forward(x_original)
 
@@ -143,6 +183,6 @@ class GMIC(nn.Module):
         g1, _ = torch.max(h_g, dim=2)
         global_vec, _ = torch.max(g1, dim=2)
         concat_vec = torch.cat([global_vec, z], dim=1)
-        self.y_fusion = torch.sigmoid(self.fusion_dnn(concat_vec))
+        self.y_fusion = self.fusion_dnn(concat_vec)
 
         return self.y_fusion
