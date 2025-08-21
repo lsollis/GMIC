@@ -508,7 +508,7 @@ class GMICDataLoader:
 
             exam_list.append(exam)
 
-        exam_list = exam_list[:50]  # Limit to first 50 exams for initial testing
+        #exam_list = exam_list[:50]  # Limit to first 50 exams for initial testing
         print(f"Converted CSV to initial format: {len(exam_list)} exams")
         return exam_list
 

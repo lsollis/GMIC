@@ -42,4 +42,3 @@ python3 src/scripts/run_model.py \
     --gpu-number $GPU_NUMBER \
     --model-index $MODEL_INDEX \
     #--visualization-flag
-

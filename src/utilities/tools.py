@@ -22,7 +22,8 @@ Defines utility functions for various tasks in GMIC.
 """
 import numpy as np
 import torch
-from torch.autograd import Variable
+# Deprecated: Variable is not needed in PyTorch 0.4 and later
+# from torch.autograd import Variable
 import torch.nn.functional as F
 
 
@@ -217,13 +218,19 @@ def generate_mask_uplft(input_image, window_shape, upper_left_points, gpu_number
     mask_x_max = upper_left_points[:,:,0] + window_h
     mask_y_min = upper_left_points[:,:,1]
     mask_y_max = upper_left_points[:,:,1] + window_w
-    # generate masks
-    mask_x = Variable(torch.arange(0, H).view(-1, 1).repeat(N, C, 1, W))
-    mask_y = Variable(torch.arange(0, W).view(1, -1).repeat(N, C, H, 1))
+    # generate masks - remove variable wrapper since it's not needed in PyTorch 0.4 and later
+    # mask_x = Variable(torch.arange(0, H).view(-1, 1).repeat(N, C, 1, W))
+    # mask_y = Variable(torch.arange(0, W).view(1, -1).repeat(N, C, H, 1))
+    mask_x = torch.arange(0, H).view(-1, 1).repeat(N, C, 1, W)
+    mask_y = torch.arange(0, W).view(1, -1).repeat(N, C, H, 1)
+    # make sure that the mask is in the right
+    # remove redundant cuda
     if gpu_number is not None:
         device = torch.device("cuda:{}".format(gpu_number))
-        mask_x = mask_x.cuda().to(device)
-        mask_y = mask_y.cuda().to(device)
+        # mask_x = mask_x.cuda().to(device)
+        # mask_y = mask_y.cuda().to(device)
+        mask_x = mask_x.to(device)
+        mask_y = mask_y.to(device)
     x_gt_min = mask_x.float() >= mask_x_min.unsqueeze(-1).unsqueeze(-1).float()
     x_ls_max = mask_x.float() < mask_x_max.unsqueeze(-1).unsqueeze(-1).float()
     y_gt_min = mask_y.float() >= mask_y_min.unsqueeze(-1).unsqueeze(-1).float()

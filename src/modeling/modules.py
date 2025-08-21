@@ -27,7 +27,12 @@ import torch.nn.functional as F
 import numpy as np
 
 from src.utilities import tools
-from torchvision.models.resnet import conv3x3
+#from torchvision.models.resnet import conv3x3
+
+def conv3x3(in_planes, out_planes, stride=1, groups=1, dilation=1):
+    """3x3 convolution with padding"""
+    return torch.nn.Conv2d(in_planes, out_planes, kernel_size=3, stride=stride,
+                           padding=dilation, groups=groups, bias=False, dilation=dilation)
 
 
 class BasicBlockV2(nn.Module):
