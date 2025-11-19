@@ -1,0 +1,27 @@
+services:
+  gmic_fl:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    # GPUs (modern compose syntax)
+    # gpus: all
+    environment:
+    #  - NVIDIA_VISIBLE_DEVICES=${GPU_DEVICES}
+      - PYTHONUNBUFFERED=1
+    container_name: gmic_fl_container
+    volumes:
+      - "${CURRENT_DIR}:/workspace"
+    ports:
+      - "8102:8102"   # FL API
+      - "8103:8103"   # FL UI
+      - "8443:8443"   # FL Admin
+    shm_size: "32gb"
+    stdin_open: true
+    tty: true
+    command: >
+      bash -lc "tmux new-session -d -s fl_server
+      'python -u -m nvflare.private.fed.app.server.server_train
+      -m /workspace
+      -s fed_server.json
+      --set secure_train=true config_folder=config org=UHCC'
+      && tail -f /dev/null"

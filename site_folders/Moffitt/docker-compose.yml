@@ -1,0 +1,24 @@
+services:
+  gmic_fl:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    # GPUs (modern compose syntax)
+    # gpus: all
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=${GPU_DEVICES}
+      - PYTHONUNBUFFERED=1
+    # Drop privileges & block escalation
+    cap_drop:
+      - ALL
+    container_name: gmic_fl_container
+    volumes:
+      - "${CURRENT_DIR}:/workspace"
+      - "${DATA_DIR}:/workspace/data"
+    ports:
+      - "8102:8102"   # FL API
+    shm_size: "32gb"
+    stdin_open: true
+    tty: true
+    #command: >
+    #  bash -lc "tmux new-session -d -s fl_client 'python -u -m nvflare.private.fed.app.client.client_train -m /workspace -s fed_client.json --set uid=Moffitt secure_train=true config_folder=config org=Moffitt' && tail -f /dev/null"

@@ -1,5 +1,5 @@
 # Use a CUDA-enabled base image compatible with Ubuntu 22.04
-FROM nvidia/cuda:12.1.0-devel-ubuntu22.04
+FROM nvidia/cuda:12.2.0-devel-ubuntu22.04
 
 # Avoid interactive prompts
 ENV DEBIAN_FRONTEND=noninteractive
@@ -9,8 +9,8 @@ ENV PYTHONPATH=/workspace:${PYTHONPATH}
 
 # Minimal OS deps (plus libgl/glib just in case)
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      python3 python3-dev python3-pip python3-venv \
-      git curl ca-certificates \
+      python3 python3-dev python3-pip python3-venv build-essential tmux \
+      git curl wget ca-certificates \
       libgl1 libglib2.0-0 \
     && ln -sf /usr/bin/python3 /usr/bin/python \
     && python3 -m pip install --upgrade pip setuptools wheel \
@@ -37,8 +37,10 @@ RUN python -m pip install --no-cache-dir \
       tqdm \
       matplotlib \
       jupyter \
-      nvflare \
-      scikit-learn
+      "nvflare==2.6.2" \
+      scikit-learn \
+      tensorboard \
+      tensorboardX
 
 # Optional: build-time sanity check so bad combos fail fast
 RUN python - <<'PY'

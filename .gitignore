@@ -11,12 +11,15 @@ data/
 processed_data/
 data_prep.ipynb
 models/converted_data.pkl
+outputs/
 
 # ============================================================================
 # NVFLARE Specific
 # ============================================================================
-# NVFLARE simulator workspaces
+# NVFLARE workspaces
 *simulator_workspace*/
+google_cloud_deployment/
+gmic-localhost-fedavg/
 
 # NVFLARE certificates and configs
 *.crt

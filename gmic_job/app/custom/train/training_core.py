@@ -1,0 +1,453 @@
+"""Shared GMIC training utilities reused by local and federated pipelines.
+
+This module centralizes model construction, optimizer configuration, freezing,
+evaluation, and random-search helpers so both `local_train_gmic.py` and
+federated executors can import without duplicating logic.
+
+Safe to import: no argparse side effects or heavy I/O at import time.
+"""
+from __future__ import annotations
+
+import os
+import copy
+import random
+import time
+import uuid
+from typing import Dict, Any, Iterable, Optional
+
+import torch
+import torch.nn as nn
+import torch.optim as optim
+import numpy as np
+from sklearn.metrics import roc_auc_score, accuracy_score
+
+from model.gmic import GMIC
+
+try:  # prefer torch built-in
+    from torch.utils.tensorboard import SummaryWriter  # type: ignore
+except Exception:  # fallback
+    try:
+        from tensorboardX import SummaryWriter  # type: ignore
+    except Exception:  # no tensorboard available; define stub
+        class SummaryWriter:  # type: ignore
+            def __init__(self, *a, **k):
+                print("[tensorboard] SummaryWriter unavailable; proceeding without TB logs")
+            def add_scalar(self, *a, **k):
+                pass
+            def add_histogram(self, *a, **k):
+                pass
+            def flush(self):
+                pass
+            def close(self):
+                pass
+
+from model import gmic
+from constants.constants import PERCENT_T_DICT
+
+__all__ = [
+    "build_gmic_from_args",
+    "load_state_dict_forgiving",
+    "load_pretrained_if_requested",
+    "configure_optimizers",
+    "apply_freezing_plan",
+    "evaluate_model",
+    "set_seed",
+    "set_requires_grad",
+    "EarlyStopper",
+    "_train_single_run",
+    "_sample_hparams",
+    "create_tb_writer",
+    "summarize_parameter_devices",
+    "first_batch_input_device_str",
+]
+
+
+def build_gmic_from_args(args):
+    """
+    Construct DataParallel-compatible GMIC strictly from CLI args.
+    """
+    params = {}
+
+    # IO / model-related knobs from CLI
+    params["image_path"] = args.image_path
+    params["num_classes"] = args.num_classes
+    params["use_v1_global"] = bool(args.use_v1_global)
+
+    # Optional structured params only if provided
+    if hasattr(args, "cam_h") and hasattr(args, "cam_w"):
+        params["cam_size"] = (args.cam_h, args.cam_w)
+
+    if hasattr(args, "K"):
+        params["K"] = args.K
+
+    if hasattr(args, "post_dim"):
+        params["post_processing_dim"] = args.post_dim
+
+    if hasattr(args, "percent_t"):
+        if args.percent_t not in PERCENT_T_DICT:
+            raise ValueError(
+                f"percent_t '{args.percent_t}' not in PERCENT_T_DICT keys {list(PERCENT_T_DICT.keys())}"
+            )
+        params["percent_t"] = PERCENT_T_DICT[args.percent_t]
+
+    if hasattr(args, "lambda_l1"):
+        params["lambda_l1"] = args.lambda_l1
+
+    if hasattr(args, "crop_h") and hasattr(args, "crop_w"):
+        params["crop_shape"] = (args.crop_h, args.crop_w)
+
+    # Construct with DataParallel-compatible version
+    return GMIC(params)
+
+def load_state_dict_forgiving(model: nn.Module, ckpt_path: str, device="cpu"):
+    sd = torch.load(ckpt_path, map_location=device)
+    try:
+        model.load_state_dict(sd, strict=True)
+        print("Loaded checkpoint with strict=True")
+    except RuntimeError:
+        print("Strict load failed; retrying with strict=False")
+        missing, unexpected = model.load_state_dict(sd, strict=False)
+        if missing:
+            print("[load] Missing keys:", missing)
+        if unexpected:
+            print("[load] Unexpected keys:", unexpected)
+
+
+def load_pretrained_if_requested(model: nn.Module, args):
+    if getattr(args, "load_checkpoint", None) and os.path.isfile(args.load_checkpoint):
+        print(f"Loading checkpoint: {args.load_checkpoint}")
+        load_state_dict_forgiving(model, args.load_checkpoint, device=getattr(args, "device", "cpu"))
+        return
+    if hasattr(model, "load_pretrained_by_index") and getattr(args, "pretrained_model_index", None):
+        print(f"Loading pretrained model by index: {args.pretrained_model_index}")
+        model.load_pretrained_by_index(args.pretrained_model_index)
+
+
+def _collect_params(obj) -> Iterable[nn.Parameter]:
+    params = []
+    if obj is None:
+        return params
+    if isinstance(obj, nn.Module):
+        params.extend([p for p in obj.parameters() if p.requires_grad])
+    elif isinstance(obj, dict):
+        for v in obj.values():
+            params.extend(_collect_params(v))
+    elif isinstance(obj, (list, tuple)):
+        for v in obj:
+            params.extend(_collect_params(v))
+    return params
+
+
+def configure_optimizers(model: nn.Module, args):
+    """Configure optimizer param groups and scheduler.
+
+    Expects args to have lr_heads, lr_backbone, weight_decay, patience.
+    Returns (optimizer, scheduler, early_stopper)
+    """
+    global_backbone = getattr(model, "global_backbone", None)
+    local_backbone = getattr(model, "local_backbone", None)
+    head_names = ["global_1x1_and_post", "mil_attention_block", "classifier_heads"]
+
+    head_params = []
+    for name in head_names:
+        m = getattr(model, name, None)
+        ps = _collect_params(m)
+        if ps:
+            head_params.append({"params": ps, "lr": args.lr_heads})
+
+    backbone_params = []
+    backbone_params += _collect_params(global_backbone)
+    backbone_params += _collect_params(local_backbone)
+
+    param_groups = []
+    if backbone_params:
+        param_groups.append({"params": backbone_params, "lr": args.lr_backbone})
+    param_groups += head_params
+    if not param_groups:
+        param_groups = [{"params": [p for p in model.parameters() if p.requires_grad], "lr": args.lr_heads}]
+
+    optimizer = optim.Adam(param_groups, weight_decay=getattr(args, "weight_decay", 1e-5))
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, mode="max", factor=0.2, patience=2
+    )
+    early_stopper = EarlyStopper(patience=getattr(args, "patience", 4))
+    return optimizer, scheduler, early_stopper
+
+
+def apply_freezing_plan(model: nn.Module, args):
+    if getattr(args, "freeze_all_backbones", False):
+        backbones = getattr(model, "backbones", None) or getattr(model, "gb", None)
+        if backbones is not None:
+            set_requires_grad(backbones, False)
+        else:
+            for name, p in model.named_parameters():
+                if "backbone" in name or "encoder" in name:
+                    p.requires_grad = False
+    if getattr(args, "freeze_transformer", False):
+        if hasattr(model, "transformer"):
+            set_requires_grad(model.transformer, False)
+        else:
+            for name, p in model.named_parameters():
+                if "transformer" in name:
+                    p.requires_grad = False
+
+
+def evaluate_model(model: nn.Module, data_loader, criterion, device, split="val"):
+    """Evaluate model and return simple metrics dict."""
+    model.eval()
+    all_predictions, all_targets = [], []
+    total_loss, num_batches = 0.0, 0
+    with torch.no_grad():
+        for inputs, targets, metadata in data_loader.get_batch_iterator(split):
+            inputs = inputs.to(device)
+            targets = targets.to(device)
+            logits = model(inputs)
+            loss = criterion(logits, targets)
+            total_loss += loss.item()
+            num_batches += 1
+            probs = torch.softmax(logits, dim=1)[:, 1].cpu().numpy()
+            all_predictions.extend(probs)
+            all_targets.extend(targets.cpu().numpy())
+    all_predictions = np.array(all_predictions)
+    all_targets = np.array(all_targets)
+    if len(all_targets) == 0:
+        return {"auc": 0.0, "accuracy": 0.0, "loss": 0.0, "total_samples": 0}
+    auc = roc_auc_score(all_targets, all_predictions) if len(np.unique(all_targets)) > 1 else 0.0
+    predicted_labels = (all_predictions > 0.5).astype(int)
+    accuracy = 100 * accuracy_score(all_targets, predicted_labels)
+    avg_loss = total_loss / max(num_batches, 1)
+    return {"auc": auc, "accuracy": accuracy, "loss": avg_loss, "total_samples": len(all_targets)}
+
+
+def set_seed(seed: int):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+
+
+def set_requires_grad(obj, requires_grad: bool):
+    if isinstance(obj, dict):
+        for v in obj.values():
+            set_requires_grad(v, requires_grad)
+        return
+    if isinstance(obj, (list, tuple)):
+        for v in obj:
+            set_requires_grad(v, requires_grad)
+        return
+    if hasattr(obj, "parameters") and callable(getattr(obj, "parameters")):
+        for p in obj.parameters():
+            p.requires_grad = requires_grad
+        return
+    try:
+        for p in obj:
+            p.requires_grad = requires_grad
+        return
+    except TypeError:
+        raise TypeError(f"Unsupported type for set_requires_grad: {type(obj)}")
+
+
+class EarlyStopper:
+    def __init__(self, patience=4):
+        self.best = -float("inf")
+        self.count = 0
+        self.patience = patience
+        self.best_state = None
+
+    def step(self, metric, model):
+        if metric > self.best:
+            self.best = metric
+            self.count = 0
+            self.best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
+            return True
+        self.count += 1
+        return False
+
+    def should_stop(self):
+        return self.count >= self.patience
+
+
+def _train_single_run(base_args, data_loader, log_fn=None, tb_writer=None, trial_index: int | None = None) -> dict:
+    """Short training loop for random search trials.
+
+    Parameters:
+        base_args: namespace of hyperparameters for this trial
+        data_loader: shared GMICDataLoader instance (train/val splits reused)
+        log_fn: optional logging function accepting a string
+        tb_writer: optional SummaryWriter for per-epoch metrics
+        trial_index: zero-based index of this trial for TB tagging (if provided)
+    Returns:
+        dict with keys {val_auc, best_path, trial_args}
+    """
+    model = build_gmic_from_args(base_args)
+    model.to(base_args.device)
+    load_pretrained_if_requested(model, base_args)
+    apply_freezing_plan(model, base_args)
+    criterion = nn.CrossEntropyLoss()
+    optimizer, scheduler, early_stopper = configure_optimizers(model, base_args)
+    best_val_auc = -float("inf")
+    model.train()
+    for epoch in range(base_args.search_max_epochs):
+        total_loss, num_batches = 0.0, 0
+        all_predictions, all_targets = [], []
+        epoch_start = time.time()
+        for batch_idx, (inputs, targets, meta) in enumerate(data_loader.get_batch_iterator('train')):
+            inputs = inputs.to(base_args.device)
+            targets = targets.to(base_args.device)
+            optimizer.zero_grad()
+            logits = model(inputs)
+            loss = criterion(logits, targets)
+            loss.backward()
+            optimizer.step()
+            if batch_idx == 0 and log_fn:
+                lrs = [pg['lr'] for pg in optimizer.param_groups]
+                log_fn("[search] epoch {} start LRs {}".format(epoch+1, ",".join(f"{lr:.2e}" for lr in lrs)))
+            if getattr(base_args, 'search_log_batch_interval', 0) and (batch_idx % base_args.search_log_batch_interval == 0) and log_fn:
+                log_fn(f"[search] epoch {epoch+1} batch {batch_idx} loss {loss.item():.4f}")
+            total_loss += loss.item()
+            num_batches += 1
+            probs = torch.softmax(logits, dim=1).detach().cpu().numpy()
+            pos_probs = probs[:, 1] if probs.ndim == 2 and probs.shape[1] > 1 else probs.reshape(-1)
+            all_predictions.extend(pos_probs)
+            all_targets.extend(targets.detach().cpu().numpy().reshape(-1))
+        train_auc = 0.0
+        if all_targets and len(set(all_targets)) > 1:
+            try:
+                train_auc = roc_auc_score(all_targets, all_predictions)
+            except Exception:
+                train_auc = 0.0
+        avg_loss = total_loss / max(num_batches, 1)
+        if log_fn:
+            log_fn(f"[search] epoch {epoch+1} train_loss {avg_loss:.4f} train_auc {train_auc:.4f} time {(time.time()-epoch_start):.1f}s")
+        val_auc = 0.0
+        val_loss = 0.0
+        val_acc = 0.0
+        if len(data_loader.get_data_for_split('val')) > 0:
+            val_metrics = evaluate_model(model, data_loader, criterion, base_args.device, split='val')
+            val_auc = val_metrics['auc']
+            val_loss = val_metrics['loss']
+            val_acc = val_metrics['accuracy']
+            scheduler.step(val_auc)
+
+            # Get current learning rates from optimizer param groups
+            current_lrs = [param_group['lr'] for param_group in optimizer.param_groups]
+            print(f"Current learning rates: {current_lrs}")
+
+            if log_fn:
+                log_fn(f"[search] epoch {epoch+1} val_auc {val_auc:.4f} val_loss {val_loss:.4f} val_acc {val_acc:.2f}%")
+            if early_stopper.step(val_auc, model):
+                best_val_auc = val_auc
+            if early_stopper.should_stop():
+                break
+            model.train()
+        # TensorBoard per-epoch logging
+        if tb_writer is not None:
+            # Use 1-based epoch for step; tag by trial
+            step = epoch + 1
+            trial_tag = f"trial_{trial_index+1}" if trial_index is not None else "trial"
+            base_tag = f"search/{trial_tag}"
+            tb_writer.add_scalar(f"{base_tag}/epoch_train_loss", avg_loss, step)
+            tb_writer.add_scalar(f"{base_tag}/epoch_train_auc", train_auc, step)
+            if len(data_loader.get_data_for_split('val')) > 0:
+                tb_writer.add_scalar(f"{base_tag}/epoch_val_auc", val_auc, step)
+                tb_writer.add_scalar(f"{base_tag}/epoch_val_loss", val_loss, step)
+                tb_writer.add_scalar(f"{base_tag}/epoch_val_acc", val_acc, step)
+            # Log learning rates
+            for i, pg in enumerate(optimizer.param_groups):
+                tb_writer.add_scalar(f"{base_tag}/lr_group_{i}", pg['lr'], step)
+            tb_writer.flush()
+    uid = uuid.uuid4().hex[:8]
+    best_path = os.path.join(base_args.out_dir, f"gmic_best_search_{uid}.pth")
+    if early_stopper.best_state is not None:
+        model.load_state_dict(early_stopper.best_state)
+        torch.save(model.state_dict(), best_path)
+    return {"val_auc": best_val_auc, "best_path": best_path, "trial_args": base_args}
+
+
+def _sample_hparams(base_args):
+    args = copy.deepcopy(base_args)
+    def jitter_lr(lr, low=0.3, high=3.0):
+        return float(lr * (10 ** random.uniform(np.log10(low), np.log10(high))))
+    args.lr_backbone = jitter_lr(base_args.lr_backbone)
+    args.lr_heads = jitter_lr(base_args.lr_heads)
+    wd_low, wd_high = 1e-6, 3e-4
+    args.weight_decay = float(10 ** random.uniform(np.log10(wd_low), np.log10(wd_high)))
+    pt_keys = list(PERCENT_T_DICT.keys())
+    args.percent_t = random.choice(pt_keys)
+    low_K = max(1, int(0.75 * base_args.K))
+    high_K = int(1.25 * base_args.K)
+    args.K = random.randint(low_K, max(low_K, high_K))
+    args.post_dim = int(base_args.post_dim * random.choice([1.0, 1.5]))
+    policies = [
+        dict(freeze_all_backbones=True, unfreeze_global_last=False, unfreeze_local_last=False),
+        dict(freeze_all_backbones=False, unfreeze_global_last=True, unfreeze_local_last=False),
+        dict(freeze_all_backbones=False, unfreeze_global_last=False, unfreeze_local_last=True),
+        dict(freeze_all_backbones=False, unfreeze_global_last=True, unfreeze_local_last=True),
+    ]
+    pol = random.choice(policies)
+    args.freeze_all_backbones = pol["freeze_all_backbones"]
+    args.unfreeze_global_last = pol["unfreeze_global_last"]
+    args.unfreeze_local_last = pol["unfreeze_local_last"]
+    args.patience = max(2, int(base_args.patience + random.choice([-1, 0, 1])))
+    return args
+
+
+def create_tb_writer(log_dir: str | None, enable: bool = True) -> Optional[SummaryWriter]:
+    """Create a SummaryWriter if enable and log_dir provided; else return None.
+
+    Ensures directory exists and does not raise if tensorboard libs missing.
+    """
+    if not enable or not log_dir:
+        return None
+    os.makedirs(log_dir, exist_ok=True)
+    try:
+        return SummaryWriter(log_dir=log_dir)
+    except Exception as e:
+        print(f"[tensorboard] failed to create writer: {e}")
+        return None
+
+#############################
+# Multi-GPU Diagnostics
+#############################
+
+def summarize_parameter_devices(model: nn.Module, max_examples: int = 12) -> dict:
+    """Return a summary of where model parameters live (device distribution).
+
+    Args:
+        model: torch model (possibly DataParallel)
+        max_examples: how many example param entries to include
+    Returns:
+        dict with keys: device_counts (dict), total_params (int), unique_devices (list), examples (list)
+    """
+    if isinstance(model, torch.nn.DataParallel):  # unwrap for inspection
+        model = model.module
+    device_counts: dict[str, int] = {}
+    total_params = 0
+    examples = []
+    for name, p in model.named_parameters():
+        dev = str(p.device)
+        n = p.numel()
+        device_counts[dev] = device_counts.get(dev, 0) + n
+        total_params += n
+        if len(examples) < max_examples:
+            examples.append(f"{name} -> {dev} ({n})")
+    summary = {
+        "device_counts": device_counts,
+        "total_params": total_params,
+        "unique_devices": sorted(device_counts.keys()),
+        "examples": examples,
+    }
+    return summary
+
+
+def first_batch_input_device_str(batch_inputs) -> str:
+    """Produce a compact string describing input tensor devices (handles tuple/list)."""
+    devices = set()
+    def _collect(x):
+        if torch.is_tensor(x):
+            devices.add(str(x.device))
+        elif isinstance(x, (list, tuple)):
+            for y in x:
+                _collect(y)
+    _collect(batch_inputs)
+    return ",".join(sorted(devices)) if devices else "<no-tensor>"

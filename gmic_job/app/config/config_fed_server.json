@@ -7,8 +7,8 @@
       "id": "fedavg_all_in_one",
       "path": "nvflare.app_common.workflows.fedavg.FedAvg",
       "args": {
-        "num_clients": 2,
-        "num_rounds": 2,
+        "num_clients": 1,
+        "num_rounds": 1,
         "start_round": 0,
         "persistor_id": "persistor"
       }
@@ -20,11 +20,11 @@
       "path": "nvflare.app_opt.pt.file_model_persistor.PTFileModelPersistor",
       "args": {
         "model": {
-          "path": "src.modeling.gmic.GMIC",
+          "path": "model.gmic.GMIC",
           "args": {
             "parameters": {
               "device_type": "gpu",
-              "gpu_number": 0,
+              "gpu_number": "0,1,2,3",
               "max_crop_noise": [100, 100],
               "max_crop_size_noise": 100,
               "cam_size": [46, 30],
@@ -33,10 +33,11 @@
               "post_processing_dim": 256,
               "num_classes": 2,
               "use_v1_global": false,
-              "percent_t": 0.1
+              "percent_t": 0.02
             }
           }
-        }
+  },
+  "source_ckpt_file_full_name": "/workspace/models/sample_model_5.p"
       }
     },
     {

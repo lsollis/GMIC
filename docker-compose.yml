@@ -5,8 +5,11 @@ services:
       dockerfile: Dockerfile
     container_name: gmic_fl_container
     volumes:
-      - /home/lsollis/Documents/GitHub/GMIC:/workspace
-      - /home/lsollis/Downloads/XAI_output:/workspace/data/XAI_output
+      #- /home/lsollis/Documents/GitHub/GMIC:/workspace
+      #- /home/lsollis/Downloads/XAI_output:/workspace/data/XAI_output
+      - /raid/home/lsollis/GMIC/GMIC:/workspace
+      - /raid/home/lsollis/data/XAI_output:/workspace/data/XAI_output
+      - /raid/home/lsollis/data/gmic_format_xai.csv:/workspace/data/gmic_format_xai.csv
       # Optional mounts for demo/testing - enable as needed
       # - ../GMIC-mods/data:/workspace/data
       # - ../GMIC-mods/demo/input_metadata.csv:/workspace/demo/input_metadata.csv
@@ -15,11 +18,14 @@ services:
       - "8102:8102"   # FL API
       - "8103:8103"   # Admin API
       - "8443:8443"   # Overseer API
+      - "6006:6006"   # TensorBoard
+      - "8443:8443" # Alternative FL API
       #- "5000:5000"   # Optional: FL API / Flask
     shm_size: "32gb"
-    runtime: nvidia               # Required for GPU access
+    gpus: all                                   # <— key line
     environment:
       - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
     stdin_open: true              # Keep stdin open for interaction
     tty: true                     # Allocate pseudo-TTY for shell
     #dns:

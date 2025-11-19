@@ -5,29 +5,49 @@
       "tasks": ["get_weights", "train", "validate", "test", "submit_model"],
       "executor": {
         "id": "GMICFederatedExecutor",
-        "path": "nvflare_code.bc_executor.GMICFederatedExecutor",
+        "path": "bc_executor.GMICFederatedExecutor",
         "args": {
-          "epochs": 2,
-          "lr": 0.0001,
+          "epochs": 1,
+          "patience": 4,
           "batch_size": 4,
+          "lr_heads": 1e-4,
+          "lr_backbone": 1e-5,
+          "weight_decay": 1e-6,
 
           "data_path": "/workspace/data/gmic_format_xai.csv",
           "image_path": "/workspace/data/XAI_output",
           "input_format": "csv",
           "enable_preprocessing": true,
-          "force_preprocessing": true,
           "cache_validation": true,
           "use_predefined_splits": true,
-          "val_split": 0.2,
-          "test_split": 0.2,
+          "val_split": 0.15,
+          "test_split": 0.15,
           "random_seed": 42,
           "output_dir": "/workspace/data/processed",
           "num_processes": 4,
 
-          "model_path": "/workspace/models/sample_model_1.p",
+          "model_path": "/workspace/models/sample_model_5.p",
+          "device": "cuda:0",
+
+          "percent_t_key": "1",
+          "lambda_l1": 1e-5,
+          "pretrained_model_index": "ensemble",
+          "load_checkpoint": "",
+
+          "train_log_batch_interval": 1,
+          "log_lr_each_epoch": false,
+          "tb_log_dir": "/workspace/tb_logs",
+          "disable_tensorboard": false,
+          "per_file_logging": true,
+          "tolerant_missing_metadata": false,
+          "debug_devices": false,
+          "use_amp": true,
+          "grad_accumulation": 1,
+          "memory_efficient": true,
+          "gpus": "0,1,2,3",
 
           "gmic_parameters": {
-            "gpu_number": 0,
+            "gpu_number": "0,1,2,3",
             "max_crop_noise": [100, 100],
             "max_crop_size_noise": 100,
             "cam_size": [46, 30],
@@ -36,11 +56,16 @@
             "post_processing_dim": 256,
             "num_classes": 2,
             "use_v1_global": false,
-            "percent_t": "auto:1"
+            "percent_t": 0.02
           },
 
-          "loss": "bce_with_logits",
-          "optimizer": { "name": "adam", "lr": 0.0001, "weight_decay": 0.0 },
+          "loss": "cross_entropy",
+          "optimizer": { "name": "adam", "lr": 0.0001, "weight_decay": 1e-6 },
+
+          "results_dir": "/workspace/gmic_results_centralized",
+          "log_file": "/workspace/outputs_centralized/executor.log",
+          "file_integrity_check": true,
+          "fail_on_integrity_error": false,
 
           "task_names": {
             "pre_train": "get_weights",
