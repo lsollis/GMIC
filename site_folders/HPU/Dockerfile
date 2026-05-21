@@ -20,7 +20,7 @@ ENV PYTHONPATH=/workspace:${PYTHONPATH}
 # conda-forge provides compilers as: compilers / gxx_linux-64 / gcc_linux-64.
 RUN conda config --set channel_priority strict && \
     conda install -y -c conda-forge \
-      tmux \
+      # tmux \
       git \
       curl \
       wget \

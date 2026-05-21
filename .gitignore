@@ -18,6 +18,8 @@ outputs/
 # ============================================================================
 # NVFLARE workspaces
 *simulator_workspace*/
+nvflare_simulator_random_weights/
+simulator_cleaning_workspace/
 google_cloud_deployment/
 gmic-localhost-fedavg/
 

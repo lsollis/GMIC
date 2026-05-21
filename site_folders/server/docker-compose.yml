@@ -3,25 +3,31 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    # GPUs (modern compose syntax)
+
+    # ✅ GPU access (Docker Compose v2)
     # gpus: all
+
     environment:
-    #  - NVIDIA_VISIBLE_DEVICES=${GPU_DEVICES}
       - PYTHONUNBUFFERED=1
-    container_name: gmic_fl_container
+
+    # ❌ Remove this to avoid name conflicts across servers
+    # container_name: gmic_fl_container
+
     volumes:
       - "${CURRENT_DIR}:/workspace"
+
     ports:
-      - "8102:8102"   # FL API
-      - "8103:8103"   # FL UI
-      - "8443:8443"   # FL Admin
+      - "8102:8102"
+      - "8103:8103"
+      - "8443:8443"
+
     shm_size: "32gb"
     stdin_open: true
     tty: true
+
+    # ✅ Run server in foreground so logs are real logs
     command: >
-      bash -lc "tmux new-session -d -s fl_server
-      'python -u -m nvflare.private.fed.app.server.server_train
+      bash -lc "python -u -m nvflare.private.fed.app.server.server_train
       -m /workspace
       -s fed_server.json
-      --set secure_train=true config_folder=config org=UHCC'
-      && tail -f /dev/null"
+      --set secure_train=true config_folder=config org=UHCC"

@@ -2,10 +2,12 @@
 
 <#
 .SYNOPSIS
-    Run FL client with Docker Compose
+    Build and start the FL client container, then open an interactive shell inside it.
 
 .DESCRIPTION
-    This script builds and runs a federated learning client using Docker Compose.
+    This script builds the container image using Docker Compose, starts the container detached,
+    then drops the user into the running container shell. From inside the container, the user
+    manually runs the startup script that creates a tmux session and launches the NVFLARE client.
 
 .PARAMETER DataDir
     Path to the data directory to mount in the container
@@ -15,19 +17,19 @@
     Default: "all"
 
 .EXAMPLE
-    .\run_client.ps1 -DataDir ".\data"
-    
+    .\run_container_windows.ps1 -DataDir ".\data"
+
 .EXAMPLE
-    .\run_client.ps1 -DataDir ".\data" -GPUs "0,1"
-    
+    .\run_container_windows.ps1 -DataDir ".\data" -GPUs "0,1"
+
 .EXAMPLE
-    .\run_client.ps1 -DataDir ".\data" -GPUs "none"
+    .\run_container_windows.ps1 -DataDir ".\data" -GPUs "none"
 #>
 
 param(
     [Parameter(Mandatory=$true, Position=0)]
     [string]$DataDir,
-    
+
     [Parameter(Position=1)]
     [string]$GPUs = "all"
 )
@@ -42,7 +44,6 @@ if ($GPUs -notmatch '^(all|none|\d+(,\d+)*)$') {
     exit 1
 }
 
-# Set error action preference
 $ErrorActionPreference = "Stop"
 
 # ---- Messaging helpers ----
@@ -60,15 +61,10 @@ function Write-InfoMessage    { param([string]$Message) Write-StatusMessage -Mes
 function Write-BuildMessage   { param([string]$Message) Write-StatusMessage -Message $Message -Icon "[BUILD]"   -Color "Yellow"}
 function Write-LaunchMessage  { param([string]$Message) Write-StatusMessage -Message $Message -Icon "[LAUNCH]"  -Color "Magenta"}
 
-# Ensure UID/GID environment variables exist for Compose interpolation
+# Ensure UID/GID environment variables exist for Compose interpolation (harmless if unused)
 try {
-    if (-not $env:UID) {
-        # Windows users don’t have a numeric UID, so use 1000 (Linux default)
-        $env:UID = "1000"
-    }
-    if (-not $env:GID) {
-        $env:GID = "1000"
-    }
+    if (-not $env:UID) { $env:UID = "1000" }
+    if (-not $env:GID) { $env:GID = "1000" }
     Write-InfoMessage "Environment UID=$($env:UID), GID=$($env:GID)"
 }
 catch {
@@ -76,19 +72,7 @@ catch {
     exit 1
 }
 
-# Main script logic
 try {
-    # === Validate parameters ===
-    if (-not $DataDir) {
-        Write-ErrorMessage "Usage: .\run_client.ps1 -DataDir /path/to/data [-GPUs gpus]"
-        Write-Host ""
-        Write-Host "Examples:"
-        Write-Host "  .\run_client.ps1 -DataDir `".\data`""
-        Write-Host "  .\run_client.ps1 -DataDir `".\data`" -GPUs `"0,1`""
-        Write-Host "  .\run_client.ps1 -DataDir `".\data`" -GPUs `"none`""
-        exit 1
-    }
-
     # === Validate data directory ===
     if (-not (Test-Path $DataDir -PathType Container)) {
         Write-ErrorMessage "Data directory '$DataDir' does not exist."
@@ -99,12 +83,12 @@ try {
     $DataDirResolved = Resolve-Path $DataDir
 
     # === Set environment variables for Compose interpolation ===
-    $env:DATA_DIR     = $DataDirResolved.Path
-    $env:GPU_DEVICES  = $GPUs
+    $env:DATA_DIR    = $DataDirResolved.Path
+    $env:GPU_DEVICES = $GPUs
 
     # === Display summary ===
     Write-Host ""
-    Write-Host "[CONFIG] Federated Learning Client Configuration" -ForegroundColor Blue
+    Write-Host "[CONFIG] FL Container Configuration" -ForegroundColor Blue
     Write-Host ("=" * 50) -ForegroundColor Blue
     Write-InfoMessage "Script directory: $env:CURRENT_DIR"
     Write-InfoMessage "Data directory:   $($env:DATA_DIR)"
@@ -127,17 +111,17 @@ try {
     }
 
     # === Check Docker Compose (new or legacy) ===
-    $composeCommand = $null
+    $composeMode = $null  # "v2" or "legacy"
     try {
         $composeVersion = docker compose version 2>$null
         if ($LASTEXITCODE -eq 0) {
-            $composeCommand = "docker compose"
-            Write-InfoMessage "Docker Compose: $composeVersion"
+            $composeMode = "v2"
+            Write-InfoMessage "Docker Compose (v2): $composeVersion"
         } else {
             $composeVersion = docker-compose --version 2>$null
             if ($LASTEXITCODE -eq 0) {
-                $composeCommand = "docker-compose"
-                Write-InfoMessage "Docker Compose: $composeVersion"
+                $composeMode = "legacy"
+                Write-InfoMessage "Docker Compose (legacy): $composeVersion"
             } else {
                 throw "Docker Compose not found"
             }
@@ -149,50 +133,70 @@ try {
         exit 1
     }
 
-    Write-Host ""
-
-    # === Build Docker image ===
-    Write-BuildMessage "Building Docker image..."
-    Write-Host ""
-    try {
-        if ($composeCommand -eq "docker compose") {
-            & docker compose build
+    # Helper to run compose with either v2 or legacy
+    function Invoke-Compose {
+        param([Parameter(Mandatory=$true)][string[]]$Args)
+        if ($composeMode -eq "v2") {
+            & docker compose @Args
         } else {
-            & docker-compose build
+            & docker-compose @Args
         }
-        if ($LASTEXITCODE -ne 0) {
-            throw "Docker build failed with exit code $LASTEXITCODE"
-        }
-        Write-SuccessMessage "Docker image built successfully"
-    }
-    catch {
-        Write-ErrorMessage "Failed to build Docker image: $($_.Exception.Message)"
-        exit 1
+        return $LASTEXITCODE
     }
 
     Write-Host ""
 
-    # === Run container ===
-    Write-LaunchMessage "Starting FL client container..."
+    # === Build image ===
+    Write-BuildMessage "Building image..."
     Write-Host ""
-    try {
-        if ($composeCommand -eq "docker compose") {
-            & docker compose up
-        } else {
-            & docker-compose up
-        }
-        $containerExitCode = $LASTEXITCODE
-
-        Write-Host ""
-        if ($containerExitCode -eq 0) {
-            Write-SuccessMessage "FL client completed successfully"
-        } else {
-            Write-ErrorMessage "FL client exited with code $containerExitCode"
-        }
+    $rc = Invoke-Compose -Args @("build","gmic_fl")
+    if ($rc -ne 0) {
+        Write-ErrorMessage "Build failed with exit code $rc"
+        exit $rc
     }
-    catch {
-        Write-ErrorMessage "Failed to run container: $($_.Exception.Message)"
-        exit 1
+    Write-SuccessMessage "Image built successfully"
+    Write-Host ""
+
+    # === Start container detached ===
+    Write-LaunchMessage "Starting container (detached)..."
+    Write-Host ""
+    $rc = Invoke-Compose -Args @("up","-d","gmic_fl")
+    if ($rc -ne 0) {
+        Write-ErrorMessage "Failed to start container (compose up -d) with exit code $rc"
+        exit $rc
+    }
+    Write-SuccessMessage "Container started: gmic_fl_container"
+    Write-Host ""
+
+    # === Drop user into container shell ===
+    Write-InfoMessage "Opening interactive shell in container..."
+    Write-Host ""
+    & docker exec -it gmic_fl_container bash -lc @'
+cd /workspace
+echo "Inside container."
+echo ""
+echo "Next steps:"
+echo "  1) Try:  bash /workspace/start_fl_client.sh"
+echo "     or:   chmod +x /workspace/start_fl_client.sh && /workspace/start_fl_client.sh"
+echo ""
+echo "  2) Fallback (if needed):"
+echo "       cd /workspace/start"
+echo "       chmod +x start_fl.sh"
+echo "       ./start_fl.sh"
+echo ""
+echo "  3) Attach later:"
+echo "       tmux attach -t fl_client"
+echo ""
+exec bash
+'@
+
+    $rc = $LASTEXITCODE
+    Write-Host ""
+    if ($rc -eq 0) {
+        Write-SuccessMessage "Exited container shell."
+    } else {
+        Write-ErrorMessage "docker exec returned exit code $rc"
+        exit $rc
     }
 }
 catch {
@@ -200,7 +204,6 @@ catch {
     exit 1
 }
 finally {
-    # === Cleanup ===
     Write-Host ""
     Write-InfoMessage "Cleaning up environment variables..."
     Remove-Item Env:DATA_DIR     -ErrorAction SilentlyContinue
@@ -209,4 +212,4 @@ finally {
 }
 
 Write-Host ""
-Write-SuccessMessage "Script completed"
+Write-SuccessMessage "Done."

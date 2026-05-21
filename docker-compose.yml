@@ -21,7 +21,7 @@ services:
       - "6006:6006"   # TensorBoard
       - "8443:8443" # Alternative FL API
       #- "5000:5000"   # Optional: FL API / Flask
-    shm_size: "32gb"
+    shm_size: "128gb"
     gpus: all                                   # <— key line
     environment:
       - NVIDIA_VISIBLE_DEVICES=all

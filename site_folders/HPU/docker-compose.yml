@@ -3,7 +3,8 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    # GPUs (modern docker compose syntax)
+
+    # GPUs (modern compose syntax)
     # gpus: all
 
     # --- GPU: Use CDI syntax (spec: devices section) ---
@@ -13,7 +14,7 @@ services:
       - "nvidia.com/gpu=${GPU_DEVICES:-all}"
 
     environment:
-      - NVIDIA_VISIBLE_DEVICES=${GPU_DEVICES:-all}
+      - NVIDIA_VISIBLE_DEVICES=${GPU_DEVICES}
       - PYTHONUNBUFFERED=1
 
     # Drop privileges & block escalation
@@ -27,10 +28,16 @@ services:
 
     container_name: gmic_fl_container
     volumes:
-      - "${CURRENT_DIR}:/workspace"
-      - "${DATA_DIR}:/workspace/data"
+      - type: bind
+        source: ${CURRENT_DIR}
+        target: /workspace
+      - type: bind
+        source: ${DATA_DIR}
+        target: /workspace/data
+
     ports:
       - "8002:8002"   # FL API
+
     shm_size: "32gb"
     stdin_open: true
     tty: true
@@ -39,3 +46,5 @@ services:
     # Podman supports systemd socket activation as an alternative, but
     # this keeps parity with Docker behavior.
     restart: unless-stopped
+
+    command: ["bash", "-lc", "exec bash"]
