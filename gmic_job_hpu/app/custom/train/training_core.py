@@ -319,6 +319,13 @@ class EarlyStopper:
         self.patience = patience
         self.best_state = None
 
+    def reset(self):
+        """Clear best/count/best_state (call at the start of each federated round so
+        best-val selection is within-round and never crosses rounds)."""
+        self.best = -float("inf")
+        self.count = 0
+        self.best_state = None
+
     def step(self, metric, model):
         if metric > self.best:
             self.best = metric

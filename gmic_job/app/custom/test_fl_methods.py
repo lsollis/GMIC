@@ -218,6 +218,20 @@ def test_amp_loss_boundary():
     print(f"[amp] bf16 loss + malignant_score().numpy() OK (loss={float(loss):.4f})")
 
 
+def test_earlystopper_reset():
+    """C2: reset() clears best/count/best_state so best-val selection is within-round
+    and never crosses rounds."""
+    from train.training_core import EarlyStopper
+    m = build_model()
+    es = EarlyStopper(patience=2)
+    assert es.step(0.5, m) is True and abs(es.best - 0.5) < 1e-9
+    assert es.step(0.4, m) is False and es.count == 1        # no improvement
+    es.reset()
+    assert es.best == -float("inf") and es.best_state is None and es.count == 0
+    assert es.step(0.1, m) is True                           # after reset, 0.1 is a fresh best
+    print("[earlystopper] reset() clears best/count/state across rounds. OK")
+
+
 ALL = [
     test_grouping,
     test_bn_skip,
@@ -226,6 +240,7 @@ ALL = [
     test_forward_smoke,
     test_gmic_loss,
     test_amp_loss_boundary,
+    test_earlystopper_reset,
     test_ditto_persistence,
 ]
 

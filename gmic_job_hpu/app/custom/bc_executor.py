@@ -568,15 +568,22 @@ class GMICFederatedExecutor(Executor):
             self.log_info(fl_ctx, "Phase 1: Training (early stopping enabled)...")
             train_metrics = self._local_train(fl_ctx, abort_signal, shareable)
 
-            # If early stopper captured a best state, ensure model reflects it before val/test & weight packaging
-            if getattr(self, 'early_stopper', None) and getattr(self.early_stopper, 'best_state', None):
+            # C2: the aggregation contribution is THIS round's FINAL post-epoch local weights
+            # (textbook FedAvg/FedProx/FedBN; for Ditto, the global-tracked w). Capture them
+            # BEFORE loading any best-val checkpoint, so the sent w is never a stale best-state.
+            final_state = {k: v.detach().cpu().clone() for k, v in self._underlying.state_dict().items()}
+
+            # Deployed/evaluated model = best-val OF THIS ROUND. Load it into the global-tracked
+            # model for eval/dumps only (non-Ditto; Ditto deploys v). The SENT w stays = final_state.
+            if (self.method not in ("ditto", "ditto_modulewise")
+                    and getattr(self, 'early_stopper', None)
+                    and getattr(self.early_stopper, 'best_state', None)):
                 try:
                     self._underlying.load_state_dict(self.early_stopper.best_state, strict=False)
-                    self.log_info(fl_ctx, f"Loaded best early-stopped weights (val_auc={self.early_stopper.best:.4f})")
-                    # Persist best-of-round model
+                    self.log_info(fl_ctx, f"Deployed/eval = best-val-of-round (val_auc={self.early_stopper.best:.4f}); sent w = final-epoch")
                     self._save_best_model(fl_ctx, {"auc": float(self.early_stopper.best)}, shareable, model_type="best_val_round")
                 except Exception as e:
-                    self.log_warning(fl_ctx, f"Failed to load best early-stopped weights: {e}")
+                    self.log_warning(fl_ctx, f"Failed to load best-val weights for eval: {e}")
 
             # --- Ditto personal pass: train v with task_loss(v) + proximal(v, w_ref) ---
             # (v persists across rounds; only the global-tracked model w is sent/aggregated.)
@@ -638,7 +645,9 @@ class GMICFederatedExecutor(Executor):
                 test_metrics = {}
 
             # --- package update for FedAvg (DXO/FLModel) ---
-            updated_weights = {k: v.detach().cpu().numpy() for k, v in self._underlying.state_dict().items()}
+            # C2: send the FINAL-epoch local weights (captured pre-reload), NOT the best-val
+            # checkpoint -- standard FedAvg/FedProx/FedBN expect the current round's local update.
+            updated_weights = {k: v.detach().cpu().numpy() for k, v in final_state.items()}
 
             combined_metrics = {**train_metrics, **val_metrics, **test_metrics, "round": int(current_round)}
             if 'val_auc' not in combined_metrics and 'val_auc' in val_metrics:
@@ -769,6 +778,10 @@ class GMICFederatedExecutor(Executor):
         """
         has_val = len(self.data_loader.get_data_for_split('val')) > 0
         self.model.train()
+        # C2: reset the early stopper each round so best-val selection is within-round
+        # (best-state never crosses rounds, for either the sent or the deployed model).
+        if getattr(self, 'early_stopper', None):
+            self.early_stopper.reset()
         total_samples = 0
         epochs_run = 0
         round_best_val = -float('inf')
