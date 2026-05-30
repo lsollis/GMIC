@@ -159,8 +159,12 @@ def test_smoke_all_methods():
             assert any("pretrained_baseline" in f for f in files), f"{m}: no baseline dump"
             assert any(f"_{m}_round0" in f and f.endswith(".csv") for f in files), \
                 f"{m}: no final prediction dump"
+            # saliency maps exported alongside predictions (keyed by the same path)
+            assert any("saliency" in f and f.endswith(".npz") for f in files), \
+                f"{m}: no saliency npz dump"
             print(f"[smoke] method={m:17s} OK ({len(fl_out.params)} keys sent, "
-                  f"{sum(f.endswith('.csv') for f in files)} csv dumps)")
+                  f"{sum(f.endswith('.csv') for f in files)} csv + "
+                  f"{sum(f.endswith('.npz') for f in files)} npz dumps)")
     print("[smoke] all methods OK")
 
 

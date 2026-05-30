@@ -47,6 +47,7 @@ from fl_utils import (
     tolerant_load_pretrained,
     gmic_malignant_loss,
     malignant_score,
+    gmic_outputs,
 )
 
 # Allowed federated methods (selected via the client job config "method" arg).
@@ -1038,12 +1039,18 @@ class GMICFederatedExecutor(Executor):
         eval_model = model if model is not None else self.model
         eval_model.eval()
         rows = []
+        sal_maps = []    # malignant saliency channel per image, aligned with `rows`
+        sal_paths = []   # same 'path' key as the CSV -> joins map<->prediction offline
+        sal_labels = []
         with torch.no_grad():
             for inputs, targets, metas in self.data_loader.get_batch_iterator(split):
                 inputs = inputs.to(self.device)
                 outputs = eval_model(inputs)
                 probs = malignant_score(outputs).detach().cpu().numpy().reshape(-1)
                 tnp = targets.detach().cpu().numpy().reshape(-1)
+                # Malignant saliency channel (already a sigmoid probability), (B, h, w)
+                _, _, _, saliency = gmic_outputs(outputs)
+                sal_np = saliency[:, 1].detach().cpu().numpy() if saliency is not None else None
                 for i, meta in enumerate(metas):
                     rows.append({
                         "site_id": client,
@@ -1056,6 +1063,10 @@ class GMICFederatedExecutor(Executor):
                         "prob_malignant": float(probs[i]),
                         "label": int(tnp[i]),
                     })
+                    if sal_np is not None:
+                        sal_maps.append(sal_np[i].astype(np.float32))
+                        sal_paths.append(meta.get("path"))
+                        sal_labels.append(int(tnp[i]))
         out = os.path.join(
             persistent_dir, f"{client}_predictions_{method_tag}_round{round_idx}_{split}.csv"
         )
@@ -1066,6 +1077,25 @@ class GMICFederatedExecutor(Executor):
             writer.writeheader()
             writer.writerows(rows)
         self.log_info(fl_ctx, f"[predictions] wrote {len(rows)} rows -> {out}")
+
+        # Malignant saliency maps for the cross-site heatmap comparison. Keyed by the
+        # SAME 'path' identifier as the prediction CSV, so map<->prediction<->label<->
+        # site<->method all join offline with no model needed. Values are post-sigmoid
+        # probabilities in [0,1] (outputs[3][:,1]), never logits.
+        if sal_maps:
+            sal_out = os.path.join(
+                persistent_dir,
+                f"{client}_saliency_{method_tag}_round{round_idx}_{split}.npz",
+            )
+            np.savez_compressed(
+                sal_out,
+                saliency=np.stack(sal_maps, axis=0),   # (N, h, w) float32 in [0,1]
+                path=np.array(sal_paths),              # join key (matches CSV 'path')
+                label=np.array(sal_labels, dtype=np.int64),
+                site_id=str(client), method=str(method_tag),
+                split=str(split), round=int(round_idx),
+            )
+            self.log_info(fl_ctx, f"[saliency] wrote {len(sal_maps)} maps -> {sal_out}")
 
 
     def _save_local_model(self, fl_ctx: FLContext, shareable: Shareable, model=None):

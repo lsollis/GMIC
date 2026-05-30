@@ -363,8 +363,9 @@ def _train_single_run(base_args, data_loader, log_fn=None, tb_writer=None, trial
                 log_fn(f"[search] epoch {epoch + 1} batch {batch_idx} loss {loss.item():.4f}")
             total_loss += loss.item()
             num_batches += 1
-            probs = torch.softmax(logits, dim=1).detach().cpu().numpy()
-            pos_probs = probs[:, 1] if probs.ndim == 2 and probs.shape[1] > 1 else probs.reshape(-1)
+            # malignant head probability (sigmoid of the fusion logit), consistent with
+            # the eval/dump path -- no softmax anywhere in the analysis tree.
+            pos_probs = torch.sigmoid(logits[:, 1]).detach().cpu().numpy().reshape(-1)
             all_predictions.extend(pos_probs)
             all_targets.extend(targets.detach().cpu().numpy().reshape(-1))
         train_auc = 0.0
