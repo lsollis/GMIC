@@ -140,9 +140,37 @@ def test_forward_smoke():
     # full-size input is required: global net downsamples by 64 -> cam (46,30)
     x = torch.randn(1, 1, 2944, 1920)
     with torch.no_grad():
-        y = m(x)
-    assert y.shape == (1, 2), y.shape
-    print(f"[forward] output shape {tuple(y.shape)} OK")
+        out = m(x)
+    # native GMIC: forward returns (fusion_logits, y_global, y_local, saliency)
+    assert isinstance(out, tuple) and len(out) == 4, type(out)
+    fusion_logits, y_global, y_local, saliency = out
+    assert fusion_logits.shape == (1, 2), fusion_logits.shape
+    assert y_global.shape == (1, 2) and y_local.shape == (1, 2)
+    assert saliency.dim() == 4 and saliency.shape[1] == 2, saliency.shape
+    # global/local/saliency are probabilities in [0,1]; fusion is a raw logit
+    for name, p in [("y_global", y_global), ("y_local", y_local), ("saliency", saliency)]:
+        assert float(p.min()) >= -1e-6 and float(p.max()) <= 1 + 1e-6, (name, float(p.min()), float(p.max()))
+    s = F.malignant_score(out)
+    assert s.shape == (1,) and 0.0 <= float(s) <= 1.0
+    print(f"[forward] 4-tuple OK; fusion={tuple(fusion_logits.shape)} saliency={tuple(saliency.shape)} mal_score={float(s):.3f}")
+
+
+def test_gmic_loss():
+    m = build_model().train()
+    x = torch.randn(2, 1, 2944, 1920)
+    t = torch.tensor([0, 1])
+    out = m(x)
+    # pos_weight is shared across heads; changing it changes the loss
+    l_pw1 = float(F.gmic_malignant_loss(out, t, lambda_l1=1e-5, pos_weight=1.0))
+    l_pw10 = float(F.gmic_malignant_loss(out, t, lambda_l1=1e-5, pos_weight=10.0))
+    assert l_pw1 != l_pw10, (l_pw1, l_pw10)
+    # main loss is finite/positive and backprops into the malignant fusion head
+    loss = F.gmic_malignant_loss(out, t, lambda_l1=1e-5, pos_weight=3.0)
+    assert torch.isfinite(loss) and float(loss) > 0
+    loss.backward()
+    g = dict(m.named_parameters())["fusion_dnn.weight"].grad
+    assert g is not None and torch.isfinite(g).all() and float(g.abs().sum()) > 0
+    print(f"[gmic_loss] OK loss={float(loss):.4f} (pw1={l_pw1:.4f} pw10={l_pw10:.4f})")
 
 
 def test_ditto_persistence():
@@ -173,6 +201,7 @@ ALL = [
     test_proximal,
     test_pretrained_load,
     test_forward_smoke,
+    test_gmic_loss,
     test_ditto_persistence,
 ]
 

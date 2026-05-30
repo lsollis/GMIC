@@ -18,6 +18,7 @@ from typing import Dict, Any, Iterable, Optional
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.optim as optim
 import numpy as np
 from sklearn.metrics import roc_auc_score, accuracy_score
@@ -252,11 +253,15 @@ def evaluate_model(model: nn.Module, data_loader, criterion, device, split="val"
         for inputs, targets, metadata in data_loader.get_batch_iterator(split):
             inputs = inputs.to(device)
             targets = targets.to(device)
-            logits = model(inputs)
-            loss = criterion(logits, targets)
+            out = model(inputs)
+            # GMIC forward returns (fusion_logits, y_global, y_local, saliency);
+            # tolerate a bare tensor (legacy). Evaluate the MALIGNANT head (index 1).
+            fusion_logits = out[0] if isinstance(out, (tuple, list)) else out
+            t = targets.to(dtype=fusion_logits.dtype).view(-1)
+            loss = F.binary_cross_entropy_with_logits(fusion_logits[:, 1], t)
             total_loss += loss.item()
             num_batches += 1
-            probs = torch.softmax(logits, dim=1)[:, 1].cpu().numpy()
+            probs = torch.sigmoid(fusion_logits[:, 1]).cpu().numpy()
             all_predictions.extend(probs)
             all_targets.extend(targets.cpu().numpy())
     all_predictions = np.array(all_predictions)
@@ -346,7 +351,8 @@ def _train_single_run(base_args, data_loader, log_fn=None, tb_writer=None, trial
             inputs = inputs.to(base_args.device)
             targets = targets.to(base_args.device)
             optimizer.zero_grad()
-            logits = model(inputs)
+            out = model(inputs)
+            logits = out[0] if isinstance(out, (tuple, list)) else out
             loss = criterion(logits, targets)
             loss.backward()
             optimizer.step()

@@ -25,6 +25,7 @@ from typing import Dict, Iterable, Tuple, Union
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 logger = logging.getLogger(__name__)
 
@@ -39,6 +40,9 @@ __all__ = [
     "proximal_penalty",
     "clone_detached_state",
     "tolerant_load_pretrained",
+    "gmic_outputs",
+    "malignant_score",
+    "gmic_malignant_loss",
 ]
 
 # ---- Confirmed prefix -> group mapping (see module docstring) ----------------
@@ -298,3 +302,76 @@ def tolerant_load_pretrained(
             if raise_on_partial:
                 raise RuntimeError(emsg)
         return report
+
+
+# ============================================================================
+# Native GMIC loss (malignant head only)
+# ----------------------------------------------------------------------------
+# Verified against upstream nyukat/GMIC (git show upstream/master:src/modeling/gmic.py):
+# GMIC has THREE deep-supervised heads, all INDEPENDENT SIGMOIDS (never softmax):
+#   y_global  = top-t%% pool of the sigmoid saliency map   -> probability in [0,1]
+#   y_local   = sigmoid(classifier_linear(z))              -> probability in [0,1]
+#   y_fusion  = sigmoid(fusion_dnn([GMP(h_g), z]))         -> probability in [0,1]
+# (the only softmax in GMIC is the patch ATTENTION, not a class head.)
+# Output order is [benign, malignant]; malignant = index 1 (run_model.py:
+#   benign_pred, malignant_pred = pred[0,0], pred[0,1]).
+#
+# This project's data carries a single binary label (benign == not-malignant), so we
+# supervise/evaluate the MALIGNANT head only and leave the benign head (index 0)
+# present-but-unsupervised (so the released checkpoint still loads 1:1).
+#
+# The model's forward() here returns the fusion head as a RAW LOGIT (pre-sigmoid) so
+# the fusion term can use the numerically-stable BCEWithLogits; y_global/y_local are
+# already probabilities, so they use plain BCE. Class imbalance is handled by ONE
+# per-sample weight applied IDENTICALLY to all three heads.
+# ============================================================================
+
+def gmic_outputs(outputs):
+    """Unpack GMIC forward() output -> (fusion_logits, y_global, y_local, saliency).
+
+    forward() returns a 4-tuple. Tolerant if a bare tensor is passed (treated as the
+    fusion logits, the other heads None) so legacy/inference callers don't break.
+    """
+    if isinstance(outputs, (tuple, list)):
+        fusion_logits = outputs[0]
+        y_global = outputs[1] if len(outputs) > 1 else None
+        y_local = outputs[2] if len(outputs) > 2 else None
+        saliency = outputs[3] if len(outputs) > 3 else None
+        return fusion_logits, y_global, y_local, saliency
+    return outputs, None, None, None
+
+
+def malignant_score(outputs, malignant_index: int = 1):
+    """Per-image malignant probability = sigmoid(fusion_logit)[:, malignant_index]."""
+    fusion_logits, _, _, _ = gmic_outputs(outputs)
+    return torch.sigmoid(fusion_logits)[:, malignant_index]
+
+
+def gmic_malignant_loss(outputs, targets, lambda_l1: float = 1e-5,
+                        pos_weight: float = 3.0, malignant_index: int = 1):
+    """Native GMIC deep-supervised loss on the malignant head only.
+
+        L = BCEWithLogits(fusion[:,m]) + BCE(y_global[:,m]) + BCE(y_local[:,m])
+            + lambda_l1 * mean_b( sum_ij |saliency[:,m]| )
+
+    `targets` are breast-level binary labels (1 = cancer). A single per-sample weight
+    w (= pos_weight for positives else 1.0) is applied IDENTICALLY to all three head
+    losses so every head sees the same effective class balance.
+    """
+    fusion_logits, y_global, y_local, saliency = gmic_outputs(outputs)
+    m = malignant_index
+    t = targets.to(dtype=fusion_logits.dtype).view(-1)
+    w = torch.ones_like(t)
+    w[t > 0.5] = float(pos_weight)
+    eps = 1e-6
+
+    loss = F.binary_cross_entropy_with_logits(fusion_logits[:, m], t, weight=w)
+    if y_global is not None:
+        loss = loss + F.binary_cross_entropy(y_global[:, m].clamp(eps, 1 - eps), t, weight=w)
+    if y_local is not None:
+        loss = loss + F.binary_cross_entropy(y_local[:, m].clamp(eps, 1 - eps), t, weight=w)
+    if saliency is not None and lambda_l1:
+        sal_m = saliency[:, m]
+        l1 = sal_m.abs().sum(dim=tuple(range(1, sal_m.dim()))).mean()
+        loss = loss + float(lambda_l1) * l1
+    return loss

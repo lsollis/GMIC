@@ -45,6 +45,8 @@ from fl_utils import (
     proximal_penalty,
     clone_detached_state,
     tolerant_load_pretrained,
+    gmic_malignant_loss,
+    malignant_score,
 )
 
 # Allowed federated methods (selected via the client job config "method" arg).
@@ -134,6 +136,7 @@ class GMICFederatedExecutor(Executor):
             use_fedbn: bool = False,
             local_epochs: int | None = None,      # alias/override for `epochs`
             pretrained_weights_path: str = "",    # falls back to model_path if empty
+            pos_weight: float = 3.0,              # malignant-class weight for GMIC BCE
         ):
             """GMIC Federated Executor (feature parity with local trainer)."""
             super().__init__()
@@ -240,6 +243,7 @@ class GMICFederatedExecutor(Executor):
                 "fusion": self.lambda_fusion,
             }
             self.use_fedbn = bool(use_fedbn)
+            self.pos_weight = float(pos_weight)
             self.pretrained_weights_path = pretrained_weights_path or ""
             if local_epochs is not None:
                 self.epochs = int(local_epochs)
@@ -731,6 +735,21 @@ class GMICFederatedExecutor(Executor):
         return outgoing_dxo.to_shareable()
 
 
+    def _compute_task_loss(self, outputs, targets):
+        """Task loss on the malignant head (native GMIC deep-supervised BCE + L1).
+
+        Default path (`loss=gmic`): BCEWithLogits(fusion) + BCE(global) + BCE(local)
+        + lambda_l1*L1(saliency), all on the malignant channel, shared pos_weight.
+        Legacy fallback (`loss=cross_entropy`): CrossEntropyLoss on the fusion logits.
+        """
+        if (getattr(self, "loss_name", "gmic") or "gmic").lower() in ("gmic", "gmic_bce", "bce"):
+            return gmic_malignant_loss(
+                outputs, targets, lambda_l1=self.lambda_l1, pos_weight=self.pos_weight
+            )
+        fusion_logits = outputs[0] if isinstance(outputs, (tuple, list)) else outputs
+        return self.criterion(fusion_logits, targets)
+
+
     def _local_train(self, fl_ctx, abort_signal, shareable: Shareable):
         """Local training with per-epoch validation, scheduler stepping, and early stopping.
 
@@ -765,8 +784,8 @@ class GMICFederatedExecutor(Executor):
                     self.optimizer.zero_grad(set_to_none=True)
 
                 with torch.cuda.amp.autocast(enabled=self.use_amp):
-                    logits = self.model(inputs)
-                    loss = self.criterion(logits, targets) / accumulate
+                    outputs = self.model(inputs)
+                    loss = self._compute_task_loss(outputs, targets) / accumulate
                     # FedProx: add (mu/2)||w - w_global||^2 to the w-pass loss.
                     # (No-op for fedavg/fedbn/local/ditto, where _prox_ref is None.)
                     if getattr(self, "_prox_ref", None) is not None:
@@ -801,14 +820,9 @@ class GMICFederatedExecutor(Executor):
                     except Exception as e:
                         self.log_warning(fl_ctx, f"[devices] diagnostics failed: {e}")
 
-                if isinstance(self.criterion, nn.CrossEntropyLoss):
-                    probs = torch.softmax(logits, dim=1).detach().cpu().numpy()
-                    pos_probs = probs[:, 1] if probs.shape[1] > 1 else probs.reshape(-1)
-                    pos_targets = targets.detach().cpu().numpy()
-                else:
-                    probs = torch.sigmoid(logits).detach().cpu().numpy().reshape(bsz, -1)
-                    pos_probs = probs[:, 0]
-                    pos_targets = targets.detach().cpu().numpy().reshape(-1)
+                # Malignant probability for batch AUC = sigmoid(fusion_logit)[:, 1]
+                pos_probs = malignant_score(outputs).detach().cpu().numpy().reshape(-1)
+                pos_targets = targets.detach().cpu().numpy().reshape(-1)
 
                 epoch_preds.extend(pos_probs)
                 epoch_targets.extend(pos_targets)
@@ -984,8 +998,8 @@ class GMICFederatedExecutor(Executor):
                 inputs = inputs.to(self.device)
                 targets = targets.to(self.device)
                 opt.zero_grad(set_to_none=True)
-                logits = v(inputs)
-                loss = self.criterion(logits, targets)
+                outputs = v(inputs)
+                loss = self._compute_task_loss(outputs, targets)
                 loss = loss + proximal_penalty(v, self._global_ref, lam)
                 loss.backward()
                 opt.step()
@@ -1027,8 +1041,8 @@ class GMICFederatedExecutor(Executor):
         with torch.no_grad():
             for inputs, targets, metas in self.data_loader.get_batch_iterator(split):
                 inputs = inputs.to(self.device)
-                logits = eval_model(inputs)
-                probs = torch.softmax(logits, dim=1)[:, 1].detach().cpu().numpy()
+                outputs = eval_model(inputs)
+                probs = malignant_score(outputs).detach().cpu().numpy().reshape(-1)
                 tnp = targets.detach().cpu().numpy().reshape(-1)
                 for i, meta in enumerate(metas):
                     rows.append({

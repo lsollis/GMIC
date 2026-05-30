@@ -258,10 +258,16 @@ class GMIC(nn.Module):
         # Attention module
         z, patch_attns, y_local = self._attention_module_forward(h_crops)
         
-        # Fusion
+        # Fusion (return the RAW logit; sigmoid is applied in the loss/eval)
         g1, _ = torch.max(h_g, dim=2)
         global_vec, _ = torch.max(g1, dim=2)
         concat_vec = torch.cat([global_vec, z], dim=1)
         y_fusion = self.fusion_dnn(concat_vec)
-        
-        return y_fusion
+
+        # Native GMIC deep supervision: expose all three heads + the saliency map.
+        #   y_fusion    : raw logits (B, num_classes)            -> BCEWithLogits in loss
+        #   y_global    : top-t%% pooled sigmoid saliency (B, C)  -> probabilities
+        #   y_local     : sigmoid(classifier_linear) (B, C)      -> probabilities
+        #   saliency_map: sigmoid saliency (B, C, h, w)          -> probabilities
+        # Output class order is [benign, malignant]; malignant = index 1.
+        return y_fusion, y_global, y_local, saliency_map

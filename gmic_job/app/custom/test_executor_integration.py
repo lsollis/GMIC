@@ -105,7 +105,7 @@ class _OA:  # optimizer args for configure_optimizers
 
 def make_executor(method, results_dir, **over):
     ex = BE.GMICFederatedExecutor(
-        method=method, epochs=1, batch_size=1, device="cpu",
+        method=method, epochs=1, batch_size=1, device="cpu", loss="gmic", pos_weight=3.0,
         patience=4, results_dir=results_dir, output_dir=results_dir, **over,
     )
     ex._logger = logging.getLogger("test")

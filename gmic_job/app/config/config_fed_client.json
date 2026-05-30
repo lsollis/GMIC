@@ -69,7 +69,8 @@
             "percent_t": 0.02
           },
 
-          "loss": "cross_entropy",
+          "loss": "gmic",
+          "pos_weight": 3.0,
           "optimizer": { "name": "adam", "lr": 0.0001, "weight_decay": 1e-6 },
 
           "results_dir": "/workspace/gmic_results_centralized",
