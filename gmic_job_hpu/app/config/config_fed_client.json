@@ -35,6 +35,16 @@
           "pretrained_model_index": "ensemble",
           "load_checkpoint": "",
 
+          "method": "fedavg",
+          "fedprox_mu": 0.01,
+          "ditto_lambda": 0.1,
+          "lambda_global": 1.0,
+          "lambda_local": 0.1,
+          "lambda_fusion": null,
+          "use_fedbn": false,
+          "local_epochs": null,
+          "pretrained_weights_path": "/workspace/models/sample_model_5.p",
+
           "train_log_batch_interval": 1,
           "log_lr_each_epoch": false,
           "tb_log_dir": "/workspace/tb_logs",

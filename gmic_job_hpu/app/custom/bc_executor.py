@@ -3,6 +3,8 @@
 # ============================================================================
 
 import os
+import csv
+import copy
 import json
 import math
 import logging
@@ -37,6 +39,16 @@ from train.training_core import (
     set_seed,
     EarlyStopper,
 )
+from fl_utils import (
+    bn_state_keys,
+    load_global_into,
+    proximal_penalty,
+    clone_detached_state,
+    tolerant_load_pretrained,
+)
+
+# Allowed federated methods (selected via the client job config "method" arg).
+VALID_METHODS = ("local", "fedavg", "fedprox", "fedbn", "ditto", "ditto_modulewise")
 
 
 class GMICFederatedExecutor(Executor):
@@ -111,7 +123,17 @@ class GMICFederatedExecutor(Executor):
             gmic_parameters: dict | None = None,
             loss: str = "cross_entropy",
             optimizer: dict | None = None,
-            task_names: dict | None = None
+            task_names: dict | None = None,
+            # ---- Federated method selection (single switch across 6 regimes) ----
+            method: str = "fedavg",
+            fedprox_mu: float = 0.01,
+            ditto_lambda: float = 0.1,
+            lambda_global: float = 1.0,
+            lambda_local: float = 0.1,
+            lambda_fusion: float | None = None,   # ties to lambda_local if None
+            use_fedbn: bool = False,
+            local_epochs: int | None = None,      # alias/override for `epochs`
+            pretrained_weights_path: str = "",    # falls back to model_path if empty
         ):
             """GMIC Federated Executor (feature parity with local trainer)."""
             super().__init__()
@@ -198,6 +220,38 @@ class GMICFederatedExecutor(Executor):
             self.test_task_name = self.task_names.get("test", self.test_task_name)
             self.submit_model_task_name = self.task_names.get("submit_model", self.submit_model_task_name)
             self.patience = patience
+
+            # ---- Federated method configuration ----
+            self.method = (method or "fedavg").lower()
+            if self.method not in VALID_METHODS:
+                self._logger.warning(
+                    "[EXEC][WARN] Unknown method '%s'; falling back to 'fedavg'. Valid: %s",
+                    self.method, VALID_METHODS,
+                )
+                self.method = "fedavg"
+            self.fedprox_mu = float(fedprox_mu)
+            self.ditto_lambda = float(ditto_lambda)
+            self.lambda_global = float(lambda_global)
+            self.lambda_local = float(lambda_local)
+            self.lambda_fusion = float(lambda_fusion) if lambda_fusion is not None else float(lambda_local)
+            self.lam_dict = {
+                "global": self.lambda_global,
+                "local": self.lambda_local,
+                "fusion": self.lambda_fusion,
+            }
+            self.use_fedbn = bool(use_fedbn)
+            self.pretrained_weights_path = pretrained_weights_path or ""
+            if local_epochs is not None:
+                self.epochs = int(local_epochs)
+            # Ditto personal model `v` and its optimizer persist across rounds.
+            self._v_model = None
+            self._v_optimizer = None
+            self._global_ref = None
+            self._prox_ref = None
+            self._prox_lambda = None
+            self._opt_args = None
+            self._pretrained_report = None
+
             # Use output_dir as the canonical results_dir for model/metrics artifacts
             self.results_dir = self.output_dir
 
@@ -363,6 +417,31 @@ class GMICFederatedExecutor(Executor):
                 self._logger.warning("[EXEC][WARN] Failed to load checkpoint %s: %s", self.load_checkpoint, e, exc_info=True)
         """
 
+        # 5b. Always initialize from the pretrained GMIC checkpoint (decision: fine-tune,
+        # not train-from-scratch). The released checkpoint keys match this model 1:1
+        # except two benign items (missing '_device_ref' buffer, unexpected
+        # 'shared_rep_filter.weight'), so a clean load reports matched=258/259.
+        # This makes "init from pretrained" robust and self-contained — independent of
+        # whether the server persistor seeds round-0 with the same checkpoint — and is
+        # what makes the round-0 baseline meaningful and `method=local` start pretrained.
+        ckpt = self.pretrained_weights_path or self.model_path
+        self._pretrained_report = None
+        if ckpt and os.path.isfile(ckpt):
+            try:
+                self._pretrained_report = tolerant_load_pretrained(
+                    self._underlying, ckpt, device=self.device,
+                    log_fn=lambda m: self._logger.info(m),
+                )
+                self._logger.info("[EXEC] Pretrained init from %s: %s", ckpt, self._pretrained_report)
+            except Exception as e:
+                self._logger.warning("[EXEC][WARN] pretrained load failed: %s", e, exc_info=True)
+        else:
+            self._logger.warning(
+                "[EXEC][WARN] pretrained checkpoint not found at '%s' — model starts from "
+                "random init and the round-0 baseline will NOT be meaningful. "
+                "Set pretrained_weights_path (or model_path) on the restricted machine.", ckpt
+            )
+
         # 6. Freezing
         class _FreezeArgs: pass
         fa = _FreezeArgs()
@@ -391,6 +470,8 @@ class GMICFederatedExecutor(Executor):
         oa.weight_decay = self.weight_decay
         oa.patience = self.patience
         self.optimizer, self.scheduler, self.early_stopper = configure_optimizers(self.model, oa)
+        # Stash optimizer args so the Ditto personal model `v` can build its own optimizer.
+        self._opt_args = oa
 
         # 8. TensorBoard
         self.tb_writer = None
@@ -441,16 +522,27 @@ class GMICFederatedExecutor(Executor):
             self.log_info(fl_ctx, f"Starting round {current_round}/{total_rounds} - Train+Validate+Test")
 
             # --- receive global model (support both FLModel and legacy raw weights) ---
+            incoming = None
             fl_model_in = FLModelUtils.from_shareable(shareable)
             if fl_model_in and fl_model_in.params:
-                safe_params = self._ensure_torch_state(fl_model_in.params, fl_ctx)
-                self._underlying.load_state_dict(safe_params, strict=False)
-                self.log_info(fl_ctx, "Loaded global model from server (FLModel; numpy→torch as needed)")
+                incoming = self._ensure_torch_state(fl_model_in.params, fl_ctx)
             elif AppConstants.MODEL_WEIGHTS in shareable:
-                legacy_params = shareable[AppConstants.MODEL_WEIGHTS]
-                safe_params = self._ensure_torch_state(legacy_params, fl_ctx)
-                self._underlying.load_state_dict(safe_params, strict=False)
-                self.log_info(fl_ctx, "Loaded global model from server (legacy MODEL_WEIGHTS; numpy→torch as needed)")
+                incoming = self._ensure_torch_state(shareable[AppConstants.MODEL_WEIGHTS], fl_ctx)
+
+            # --- round-0 pretrained baseline (BEFORE consuming the global) ---
+            # initialize() pretrained-loads the model, so right now `self.model` holds the
+            # cold-start weights. Dump its val/test predictions once so every method is
+            # comparable to the "no local adaptation at round 0" reference row.
+            if current_round == 0:
+                try:
+                    self._dump_baseline(fl_ctx)
+                except Exception as e:
+                    self.log_warning(fl_ctx, f"[baseline] dump failed: {e}")
+
+            # --- method-aware consumption of the global model ---
+            # local: skip load | fedbn/use_fedbn: skip BN keys | else: full load.
+            # Also captures the frozen global ref (FedProx/Ditto) and lazily inits Ditto v.
+            self._consume_global(incoming, fl_ctx)
 
             # === NUCLEAR OPTION: FORCE RANDOM INIT FOR THIS RUN ===
             # self._reset_model_weights()
@@ -470,39 +562,61 @@ class GMICFederatedExecutor(Executor):
                 except Exception as e:
                     self.log_warning(fl_ctx, f"Failed to load best early-stopped weights: {e}")
 
+            # --- Ditto personal pass: train v with task_loss(v) + proximal(v, w_ref) ---
+            # (v persists across rounds; only the global-tracked model w is sent/aggregated.)
+            if self.method in ("ditto", "ditto_modulewise"):
+                self._train_personal_model(fl_ctx, abort_signal)
+
+            # Deployed/evaluated model: personal v for Ditto-family, else the global-tracked model.
+            deployed = self._v_model if self.method in ("ditto", "ditto_modulewise") else self.model
+
             num_examples = int(train_metrics.get("train_samples", self.batch_size))
             if num_examples <= 0:
                 # ensure a positive weight so FedAvg doesn’t drop this update
                 num_examples = max(1, self.batch_size)
 
             if not abort_signal.triggered:
-                self._save_local_model(fl_ctx, shareable)
+                self._save_local_model(fl_ctx, shareable, model=deployed)
 
-            # --- VAL ---
+            # --- VAL (on the deployed model: v for Ditto-family, else w) ---
             self.log_info(fl_ctx, "Phase 2: Validation...")
-            val_core = self._evaluate_model(fl_ctx, split="val")
+            val_core = self._evaluate_model(fl_ctx, split="val", model=deployed)
             # Prefix validation metrics so server selector finds 'val_auc'
             val_metrics = {f"val_{k}": v for k, v in val_core.items() if k in ("auc", "accuracy", "loss", "samples")}
+
+            # Per-site validation metric for the deployed model (offline ranking / fairness).
+            self.log_info(
+                fl_ctx,
+                f"[per-site-metric] site={fl_ctx.get_identity_name()} round={current_round} "
+                f"method={self.method} deployed_val_auc={val_core.get('auc', float('nan')):.4f}"
+            )
 
             # Update best tracking
             if val_core.get('auc', -1) > self.best_metrics.get('val_auc', -1):
                 self.best_metrics['val_auc'] = val_core['auc']
                 try:
-                    self._save_best_model(fl_ctx, {"auc": val_core['auc']}, shareable, model_type="best_val_overall")
+                    self._save_best_model(fl_ctx, {"auc": val_core['auc']}, shareable, model_type="best_val_overall", model=deployed)
                 except Exception:
                     pass
 
             # --- TEST (final round only) ---
             if current_round == (total_rounds - 1):
                 self.log_info(fl_ctx, "Phase 3: Testing...")
-                test_core = self._evaluate_model(fl_ctx, split="test")
+                test_core = self._evaluate_model(fl_ctx, split="test", model=deployed)
                 test_metrics = {f"test_{k}": v for k, v in test_core.items() if k in ("auc", "accuracy", "loss", "samples")}
                 if test_core.get('auc', -1) > self.best_metrics.get('test_auc', -1):
                     self.best_metrics['test_auc'] = test_core['auc']
                     try:
-                        self._save_best_model(fl_ctx, test_core, shareable, model_type="best_test_overall")
+                        self._save_best_model(fl_ctx, test_core, shareable, model_type="best_test_overall", model=deployed)
                     except Exception:
                         pass
+                # End-of-run prediction dump for offline AUC / DeLong CIs / cross-site sigma(AUC).
+                for _split in ("val", "test"):
+                    try:
+                        self._dump_predictions(fl_ctx, split=_split, model=deployed,
+                                               round_idx=current_round, method_tag=self.method)
+                    except Exception as e:
+                        self.log_warning(fl_ctx, f"[predictions] dump ({_split}) failed: {e}")
             else:
                 self.log_info(fl_ctx, "Phase 3: Skipping test (not final round)")
                 test_metrics = {}
@@ -653,6 +767,12 @@ class GMICFederatedExecutor(Executor):
                 with torch.cuda.amp.autocast(enabled=self.use_amp):
                     logits = self.model(inputs)
                     loss = self.criterion(logits, targets) / accumulate
+                    # FedProx: add (mu/2)||w - w_global||^2 to the w-pass loss.
+                    # (No-op for fedavg/fedbn/local/ditto, where _prox_ref is None.)
+                    if getattr(self, "_prox_ref", None) is not None:
+                        loss = loss + proximal_penalty(
+                            self._underlying, self._prox_ref, self._prox_lambda
+                        ) / accumulate
 
                 if self.use_amp and self._scaler is not None:
                     self._scaler.scale(loss).backward()
@@ -767,9 +887,14 @@ class GMICFederatedExecutor(Executor):
         return train_metrics
 
 
-    def _evaluate_model(self, fl_ctx: FLContext, split='val'):
-        """Run evaluation and return base metric dict (auc, accuracy, loss, samples)."""
-        core = evaluate_model(self.model, self.data_loader, self.criterion, self.device, split=split)
+    def _evaluate_model(self, fl_ctx: FLContext, split='val', model=None):
+        """Run evaluation and return base metric dict (auc, accuracy, loss, samples).
+
+        `model` defaults to self.model (the global-tracked w); pass the deployed
+        model (e.g. the Ditto personal model v) to evaluate it instead.
+        """
+        eval_model = model if model is not None else self.model
+        core = evaluate_model(eval_model, self.data_loader, self.criterion, self.device, split=split)
         out = {
             "auc": float(core["auc"]),
             "accuracy": float(core["accuracy"]),
@@ -780,29 +905,180 @@ class GMICFederatedExecutor(Executor):
         return out
 
 
-    def _save_local_model(self, fl_ctx: FLContext, shareable: Shareable):
-        """Save current model state"""
+    def _consume_global(self, incoming, fl_ctx: FLContext):
+        """Method-aware load of the received global weights into the tracked model w.
+
+          local             -> skip the load (each site trains independently from its
+                               pretrained init; it still returns w so NVFLARE plumbing
+                               is happy, but never consumes the aggregate).
+          fedbn / use_fedbn -> load global but SKIP BatchNorm keys (local BN preserved).
+          else              -> full load.
+
+        Also captures the frozen global reference w_ref (FedProx/Ditto) and lazily
+        initializes the Ditto personal model v exactly once (from the pretrained w).
+        """
+        method = self.method
+        needs_ref = method in ("fedprox", "ditto", "ditto_modulewise")
+        self._prox_ref = None
+        self._prox_lambda = None
+
+        if incoming is None:
+            self.log_info(fl_ctx, "No global weights in shareable; keeping current model")
+        elif method == "local":
+            self.log_info(fl_ctx, "[method=local] skipping global load (independent local training)")
+        else:
+            skip = set()
+            if method == "fedbn" or self.use_fedbn:
+                skip = bn_state_keys(self._underlying)
+            stats = load_global_into(self._underlying, incoming, skip_keys=skip)
+            self.log_info(
+                fl_ctx,
+                f"[method={method}] consumed global: {stats} (bn_keys_skipped={len(skip)})"
+            )
+
+        # Frozen reference = the round's received global weights (current w state).
+        if needs_ref and incoming is not None:
+            self._global_ref = clone_detached_state(self._underlying)
+            if method == "fedprox":
+                self._prox_ref = self._global_ref
+                self._prox_lambda = float(self.fedprox_mu)
+        else:
+            self._global_ref = None
+
+        # Lazily create the Ditto personal model v ONCE, from the (pretrained) w.
+        if method in ("ditto", "ditto_modulewise") and self._v_model is None:
+            self._v_model = copy.deepcopy(self._underlying).to(self.device)
+            try:
+                opt, _, _ = configure_optimizers(self._v_model, self._opt_args)
+            except Exception as e:
+                self.log_warning(fl_ctx, f"[ditto] failed to build v optimizer via configure_optimizers: {e}")
+                opt = torch.optim.Adam(self._v_model.parameters(), lr=self.lr_heads,
+                                       weight_decay=self.weight_decay)
+            self._v_optimizer = opt
+            self.log_info(fl_ctx, "[ditto] initialized personal model v from pretrained init (persists across rounds)")
+
+
+    def _train_personal_model(self, fl_ctx: FLContext, abort_signal: Signal):
+        """Ditto personal pass: train v for self.epochs with task_loss(v) + proximal(v, w_ref).
+
+        v and its optimizer are instance attributes that persist across rounds; v is
+        never reset to the global. lambda is a scalar (ditto) or a per-group dict
+        (ditto_modulewise: {global, local, fusion}). Runs in plain fp32 (no AMP) for
+        simplicity/correctness — this is the deployed model, not the comms payload.
+        """
+        v = self._v_model
+        opt = self._v_optimizer
+        if v is None or opt is None or self._global_ref is None:
+            self.log_warning(fl_ctx, "[ditto] personal model/ref not ready; skipping personal pass")
+            return
+        lam = self.ditto_lambda if self.method == "ditto" else self.lam_dict
+        self.log_info(fl_ctx, f"[ditto] personal pass: epochs={self.epochs} lambda={lam}")
+        v.train()
+        for epoch in range(self.epochs):
+            if abort_signal.triggered:
+                break
+            n_batches = 0
+            for inputs, targets, metadata in self.data_loader.get_batch_iterator('train'):
+                if abort_signal.triggered:
+                    break
+                inputs = inputs.to(self.device)
+                targets = targets.to(self.device)
+                opt.zero_grad(set_to_none=True)
+                logits = v(inputs)
+                loss = self.criterion(logits, targets)
+                loss = loss + proximal_penalty(v, self._global_ref, lam)
+                loss.backward()
+                opt.step()
+                n_batches += 1
+            self.log_info(fl_ctx, f"[ditto] personal epoch {epoch + 1}/{self.epochs} done ({n_batches} batches)")
+
+
+    def _dump_baseline(self, fl_ctx: FLContext):
+        """Round-0 cold-start reference: evaluate the pretrained weights on val+test and
+        dump per-sample predictions tagged method=pretrained_baseline, round=0. This is
+        the row every trained method is measured against and verifies the load+pipeline.
+        """
+        report = getattr(self, "_pretrained_report", None)
+        if report is not None:
+            self.log_info(fl_ctx, f"[baseline] pretrained load report: {report}")
+        for split in ("val", "test"):
+            if not self.data_loader.get_data_for_split(split):
+                continue
+            core = self._evaluate_model(fl_ctx, split=split, model=self.model)
+            self.log_info(
+                fl_ctx,
+                f"[baseline] site={fl_ctx.get_identity_name()} method=pretrained_baseline "
+                f"round=0 {split}_auc={core['auc']:.4f} {split}_acc={core['accuracy']:.2f} n={core['samples']}"
+            )
+            self._dump_predictions(fl_ctx, split=split, model=self.model,
+                                   round_idx=0, method_tag="pretrained_baseline")
+
+
+    def _dump_predictions(self, fl_ctx: FLContext, split, model, round_idx, method_tag):
+        """Save per-sample (view-level) malignancy scores + labels + site_id to CSV so
+        breast-level AUC, DeLong CIs and cross-site sigma(AUC) can be computed offline.
+        """
+        persistent_dir = getattr(self, 'results_dir', "/workspace/gmic_results")
+        os.makedirs(persistent_dir, exist_ok=True)
+        client = fl_ctx.get_identity_name()
+        eval_model = model if model is not None else self.model
+        eval_model.eval()
+        rows = []
+        with torch.no_grad():
+            for inputs, targets, metas in self.data_loader.get_batch_iterator(split):
+                inputs = inputs.to(self.device)
+                logits = eval_model(inputs)
+                probs = torch.softmax(logits, dim=1)[:, 1].detach().cpu().numpy()
+                tnp = targets.detach().cpu().numpy().reshape(-1)
+                for i, meta in enumerate(metas):
+                    rows.append({
+                        "site_id": client,
+                        "round": round_idx,
+                        "method": method_tag,
+                        "split": split,
+                        "exam_id": meta.get("exam_id"),
+                        "view": meta.get("view"),
+                        "path": meta.get("path"),
+                        "prob_malignant": float(probs[i]),
+                        "label": int(tnp[i]),
+                    })
+        out = os.path.join(
+            persistent_dir, f"{client}_predictions_{method_tag}_round{round_idx}_{split}.csv"
+        )
+        with open(out, "w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=[
+                "site_id", "round", "method", "split", "exam_id", "view",
+                "path", "prob_malignant", "label"])
+            writer.writeheader()
+            writer.writerows(rows)
+        self.log_info(fl_ctx, f"[predictions] wrote {len(rows)} rows -> {out}")
+
+
+    def _save_local_model(self, fl_ctx: FLContext, shareable: Shareable, model=None):
+        """Save current (deployed) model state"""
         persistent_dir = getattr(self, 'results_dir', "/workspace/gmic_results")
         os.makedirs(persistent_dir, exist_ok=True)
 
         client_name = fl_ctx.get_identity_name()
         current_round = shareable.get_header(AppConstants.CURRENT_ROUND)
 
+        save_model = model if model is not None else self.model
         model_path = f"{persistent_dir}/{client_name}_gmic_model_round_{current_round}.pth"
-        torch.save(self.model.state_dict(), model_path)
+        torch.save(save_model.state_dict(), model_path)
         self.log_info(fl_ctx, f"Model saved: {model_path}")
 
 
-    def _save_best_model(self, fl_ctx, metrics, shareable: Shareable, model_type="best"):
-        """Save best performing model (expects metrics with keys including auc)."""
+    def _save_best_model(self, fl_ctx, metrics, shareable: Shareable, model_type="best", model=None):
+        """Save best performing (deployed) model (expects metrics with keys including auc)."""
         persistent_dir = getattr(self, 'results_dir', "/workspace/gmic_results")
         os.makedirs(persistent_dir, exist_ok=True)
 
         client_name = fl_ctx.get_identity_name()
         current_round = shareable.get_header(AppConstants.CURRENT_ROUND)
 
+        save_model = model if model is not None else self.model
         model_path = f"{persistent_dir}/{client_name}_{model_type}_gmic_model.pth"
-        torch.save(self.model.state_dict(), model_path)
+        torch.save(save_model.state_dict(), model_path)
 
         metrics_path = f"{persistent_dir}/{client_name}_{model_type}_gmic_metrics.json"
         enriched = {
