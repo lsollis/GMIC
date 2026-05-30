@@ -256,7 +256,45 @@ class GMICDataLoader:
         self._create_data_splits()
 
     # ---------- Converters / helpers ----------
+    def _validate_labels(self):
+        """R1: hard label-contract check on the CSV before conversion.
+
+        Fails loudly if view/exam labels are not strictly {0,1} (or contain NaN), logs
+        per-value counts, and asserts each breast (patient, exam, laterality) has its two
+        views agreeing on a single label. A disagreement means the data is malformed
+        (contralateral-breast mislabeling, etc.) and must surface, not be silently
+        resolved -- which also reconciles the two converters (their differing
+        last-wins vs sticky-to-1 rules become equivalent once views are guaranteed to agree).
+        """
+        df = getattr(self, "df", None)
+        if df is None:
+            return
+        for col in ("view_level_label", "exam_level_label"):
+            if col not in df.columns:
+                continue
+            vals = df[col]
+            try:
+                self._log(f"[labels] {col} value_counts: {vals.value_counts(dropna=False).to_dict()}")
+            except Exception:
+                pass
+            if vals.isna().any():
+                raise ValueError(f"[labels] {col} contains NaN; labels must be strictly 0/1")
+            bad = set(int(v) if float(v).is_integer() else v for v in vals.unique()) - {0, 1}
+            if bad:
+                raise ValueError(f"[labels] {col} has non-binary values {bad}; must be strictly 0/1")
+        if {"patient_id", "exam_id", "laterality", "view_level_label"}.issubset(df.columns):
+            nun = df.groupby(["patient_id", "exam_id", "laterality"])["view_level_label"].nunique()
+            bad_breasts = nun[nun > 1]
+            if len(bad_breasts) > 0:
+                raise ValueError(
+                    f"[labels] {len(bad_breasts)} breast(s) have disagreeing view_level_label "
+                    f"across their views (e.g. {list(bad_breasts.index[:3])}). Breast-level "
+                    f"labels must agree by construction; fix the data."
+                )
+        self._log("[labels] contract OK (strictly 0/1; breast-level views agree)")
+
     def _convert_csv_to_gmic_format(self):
+        self._validate_labels()
         exam_list = []
         grouped = self.df.groupby(["patient_id", "exam_id"])
         for (patient_id, exam_id), group in grouped:
@@ -496,6 +534,7 @@ class GMICDataLoader:
 
     # ---------- Staging & Cropping ----------
     def _convert_csv_to_initial_format(self):
+        self._validate_labels()
         exam_list = []
         grouped = self.df.groupby(["patient_id", "exam_id"])
         for (patient_id, exam_id), group in grouped:
@@ -920,16 +959,21 @@ class GMICDataLoader:
             path = self._resolve_image_path(row)
             if path is None:
                 continue
-            img = _load_image(path, row["view"], row.get("horizontal_flip", "NO"))
-            chw = _process_image_to_2944x1920(
-                image=img,
-                view=row["view"],
-                best_center=row.get("best_center"),
-                rng=rng,
-                is_train=is_train,
-                max_crop_noise=self.train_max_crop_noise,
-                max_crop_size_noise=self.train_max_crop_size_noise,
-            )
+            try:
+                img = _load_image(path, row["view"], row.get("horizontal_flip", "NO"))
+                chw = _process_image_to_2944x1920(
+                    image=img,
+                    view=row["view"],
+                    best_center=row.get("best_center"),
+                    rng=rng,
+                    is_train=is_train,
+                    max_crop_noise=self.train_max_crop_noise,
+                    max_crop_size_noise=self.train_max_crop_size_noise,
+                )
+            except Exception as e:
+                # R2: a single corrupt/unreadable image must not abort a multi-hour run.
+                self._log(f"[image] skipping unreadable/bad image {path}: {e}", level=logging.WARNING)
+                continue
             batch_images.append(chw[None, ...])
             target = row.get("view_level_label", row.get("exam_level_label", 0))
             batch_targets.append(int(target))

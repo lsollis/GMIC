@@ -373,6 +373,17 @@ class GMICFederatedExecutor(Executor):
             key = pt.split(":", 1)[1]
             overrides["percent_t"] = PERCENT_T_DICT.get(key, PERCENT_T_DICT["1"])
         self.gmic_parameters = {**gmic_defaults, **overrides}
+        # C1: single source of truth for percent_t. The model is built from
+        # percent_t_key (-> PERCENT_T_DICT). Fail loud if a gmic_parameters.percent_t
+        # override disagrees, so a config sweep can't silently use a different threshold.
+        _pt_key_val = PERCENT_T_DICT.get(self.percent_t_key, PERCENT_T_DICT["1"])
+        _pt_override = overrides.get("percent_t")
+        if isinstance(_pt_override, (int, float)) and abs(float(_pt_override) - float(_pt_key_val)) > 1e-9:
+            raise ValueError(
+                f"percent_t mismatch: gmic_parameters.percent_t={_pt_override} but "
+                f"percent_t_key='{self.percent_t_key}' -> {_pt_key_val}. Use ONE source "
+                f"(prefer percent_t_key; remove percent_t from gmic_parameters)."
+            )
 
         # 5. Model build
         class _Args: pass
@@ -432,14 +443,14 @@ class GMICFederatedExecutor(Executor):
         ckpt = self.pretrained_weights_path or self.model_path
         self._pretrained_report = None
         if ckpt and os.path.isfile(ckpt):
-            try:
-                self._pretrained_report = tolerant_load_pretrained(
-                    self._underlying, ckpt, device=self.device,
-                    log_fn=lambda m: self._logger.info(m),
-                )
-                self._logger.info("[EXEC] Pretrained init from %s: %s", ckpt, self._pretrained_report)
-            except Exception as e:
-                self._logger.warning("[EXEC][WARN] pretrained load failed: %s", e, exc_info=True)
+            # R4: raise_on_partial=True and NO broad except -> a partial backbone load
+            # (or a corrupt checkpoint) aborts initialize() loudly. A half-loaded model
+            # would make the cold-start baseline silently meaningless.
+            self._pretrained_report = tolerant_load_pretrained(
+                self._underlying, ckpt, device=self.device,
+                log_fn=lambda m: self._logger.info(m), raise_on_partial=True,
+            )
+            self._logger.info("[EXEC] Pretrained init from %s: %s", ckpt, self._pretrained_report)
         else:
             self._logger.warning(
                 "[EXEC][WARN] pretrained checkpoint not found at '%s' — model starts from "
@@ -647,10 +658,10 @@ class GMICFederatedExecutor(Executor):
                 MetaKey.NUM_STEPS_CURRENT_ROUND: num_examples,
                 "num_examples": num_examples,
             }
-            if val_auc_for_meta is not None:
+            if val_auc_for_meta is not None and not math.isnan(float(val_auc_for_meta)):
                 model_meta['val_auc'] = float(val_auc_for_meta)
             else:
-                self.log_warning(fl_ctx, "[metrics-debug] val_auc missing from numeric_metrics; selector may warn")
+                self.log_warning(fl_ctx, "[metrics-debug] val_auc missing/NaN (degenerate split?); selector may warn")
 
             fl_model_out = FLModel(
                 params=updated_weights,
@@ -784,15 +795,20 @@ class GMICFederatedExecutor(Executor):
                 if batch_idx % accumulate == 0:
                     self.optimizer.zero_grad(set_to_none=True)
 
-                with torch.cuda.amp.autocast(enabled=self.use_amp):
+                amp_device = "cuda" if "cuda" in str(self.device) else "cpu"
+                with torch.autocast(device_type=amp_device, enabled=self.use_amp):
                     outputs = self.model(inputs)
-                    loss = self._compute_task_loss(outputs, targets) / accumulate
-                    # FedProx: add (mu/2)||w - w_global||^2 to the w-pass loss.
-                    # (No-op for fedavg/fedbn/local/ditto, where _prox_ref is None.)
-                    if getattr(self, "_prox_ref", None) is not None:
-                        loss = loss + proximal_penalty(
-                            self._underlying, self._prox_ref, self._prox_lambda
-                        ) / accumulate
+                # Loss is computed OUTSIDE autocast, in fp32: F.binary_cross_entropy
+                # (global/local heads, on already-sigmoided probabilities) is unsafe under
+                # autocast and raises on GPU. The canonical AMP pattern autocasts only the
+                # forward; BCEWithLogits/backward run in fp32.
+                loss = self._compute_task_loss(outputs, targets) / accumulate
+                # FedProx: add (mu/2)||w - w_global||^2 to the w-pass loss.
+                # (No-op for fedavg/fedbn/local/ditto, where _prox_ref is None.)
+                if getattr(self, "_prox_ref", None) is not None:
+                    loss = loss + proximal_penalty(
+                        self._underlying, self._prox_ref, self._prox_lambda
+                    ) / accumulate
 
                 if self.use_amp and self._scaler is not None:
                     self._scaler.scale(loss).backward()

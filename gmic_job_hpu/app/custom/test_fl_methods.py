@@ -195,6 +195,29 @@ def test_ditto_persistence():
     print("[ditto] v persists across rounds and is not reset to global. OK")
 
 
+def test_amp_loss_boundary():
+    """B1 regression on the bf16 boundary, model-free.
+
+    Mirrors the use_amp path: on autocast-produced bf16 outputs, both the loss (its BCE
+    terms need fp32) and malignant_score (`.numpy()` on bf16 raises) must work. This is
+    the exact path that crashed the use_amp=True executor run.
+    """
+    B = 4
+    t = torch.tensor([0, 1, 0, 1])
+    out = (
+        torch.randn(B, 2, dtype=torch.bfloat16, requires_grad=True),   # fusion logits
+        torch.rand(B, 2, dtype=torch.bfloat16, requires_grad=True),    # y_global prob
+        torch.rand(B, 2, dtype=torch.bfloat16, requires_grad=True),    # y_local prob
+        torch.rand(B, 2, 46, 30, dtype=torch.bfloat16, requires_grad=True),  # saliency
+    )
+    loss = F.gmic_malignant_loss(out, t, pos_weight=3.0)
+    assert torch.isfinite(loss) and float(loss) > 0
+    loss.backward()
+    sn = F.malignant_score(out).detach().cpu().numpy()   # bf16 -> must cast to fp32
+    assert sn.shape == (B,) and float(sn.min()) >= 0.0 and float(sn.max()) <= 1.0
+    print(f"[amp] bf16 loss + malignant_score().numpy() OK (loss={float(loss):.4f})")
+
+
 ALL = [
     test_grouping,
     test_bn_skip,
@@ -202,6 +225,7 @@ ALL = [
     test_pretrained_load,
     test_forward_smoke,
     test_gmic_loss,
+    test_amp_loss_boundary,
     test_ditto_persistence,
 ]
 

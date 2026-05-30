@@ -342,9 +342,14 @@ def gmic_outputs(outputs):
 
 
 def malignant_score(outputs, malignant_index: int = 1):
-    """Per-image malignant probability = sigmoid(fusion_logit)[:, malignant_index]."""
+    """Per-image malignant probability = sigmoid(fusion_logit)[:, malignant_index].
+
+    Cast to fp32 first: under autocast the fusion output is fp16/bf16, and bf16 cannot be
+    converted to numpy (`.numpy()` raises). fp32 is also what every downstream consumer
+    (AUC, DeLong dumps, saliency join) expects.
+    """
     fusion_logits, _, _, _ = gmic_outputs(outputs)
-    return torch.sigmoid(fusion_logits)[:, malignant_index]
+    return torch.sigmoid(fusion_logits.float())[:, malignant_index]
 
 
 def gmic_malignant_loss(outputs, targets, lambda_l1: float = 1e-5,
@@ -360,6 +365,9 @@ def gmic_malignant_loss(outputs, targets, lambda_l1: float = 1e-5,
     """
     fusion_logits, y_global, y_local, saliency = gmic_outputs(outputs)
     m = malignant_index
+    # Cast to fp32: F.binary_cross_entropy is unsafe in fp16/bf16. The executor already
+    # computes this loss OUTSIDE autocast, but cast defensively so any caller is safe.
+    fusion_logits = fusion_logits.float()
     t = targets.to(dtype=fusion_logits.dtype).view(-1)
     w = torch.ones_like(t)
     w[t > 0.5] = float(pos_weight)
@@ -367,11 +375,11 @@ def gmic_malignant_loss(outputs, targets, lambda_l1: float = 1e-5,
 
     loss = F.binary_cross_entropy_with_logits(fusion_logits[:, m], t, weight=w)
     if y_global is not None:
-        loss = loss + F.binary_cross_entropy(y_global[:, m].clamp(eps, 1 - eps), t, weight=w)
+        loss = loss + F.binary_cross_entropy(y_global[:, m].float().clamp(eps, 1 - eps), t, weight=w)
     if y_local is not None:
-        loss = loss + F.binary_cross_entropy(y_local[:, m].clamp(eps, 1 - eps), t, weight=w)
+        loss = loss + F.binary_cross_entropy(y_local[:, m].float().clamp(eps, 1 - eps), t, weight=w)
     if saliency is not None and lambda_l1:
-        sal_m = saliency[:, m]
+        sal_m = saliency[:, m].float()
         l1 = sal_m.abs().sum(dim=tuple(range(1, sal_m.dim()))).mean()
         loss = loss + float(lambda_l1) * l1
     return loss

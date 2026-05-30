@@ -204,10 +204,25 @@ def test_ditto_persistence_across_rounds():
     print("[ditto] personal model + optimizer persist across rounds; v != w. OK")
 
 
+def test_amp_path():
+    """B1 end-to-end guard: a use_amp=True round must complete. The GMIC forward runs
+    fine under autocast; the bug was the loss (BCE) and malignant_score().numpy() on
+    autocast (bf16) outputs. Every other test runs use_amp=False, so this is the guard
+    that the AMP regression can't return.
+    """
+    with tempfile.TemporaryDirectory() as td:
+        ex = make_executor("fedavg", td, use_amp=True)
+        srv = GMIC(copy.deepcopy(GMIC_PARAMS))
+        reply = run_round(ex, srv, round_idx=0, total_rounds=1)
+        assert_valid_reply(reply, "fedavg(use_amp=True)")
+    print("[amp] use_amp=True round completed (forward autocast / loss+score fp32). OK")
+
+
 ALL = [
     test_smoke_all_methods,
     test_fedavg_no_regression,
     test_ditto_persistence_across_rounds,
+    test_amp_path,
 ]
 
 if __name__ == "__main__":

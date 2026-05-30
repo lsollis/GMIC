@@ -266,13 +266,22 @@ def evaluate_model(model: nn.Module, data_loader, criterion, device, split="val"
             all_targets.extend(targets.cpu().numpy())
     all_predictions = np.array(all_predictions)
     all_targets = np.array(all_targets)
-    if len(all_targets) == 0:
-        return {"auc": 0.0, "accuracy": 0.0, "loss": 0.0, "total_samples": 0}
-    auc = roc_auc_score(all_targets, all_predictions) if len(np.unique(all_targets)) > 1 else 0.0
+    n_pos = int((all_targets == 1).sum()) if len(all_targets) else 0
+    if len(all_targets) == 0 or len(np.unique(all_targets)) < 2:
+        # R3: AUC is undefined on a degenerate split (no positives or no negatives).
+        # Return NaN (so it is excluded from ranking/early-stop, not silently counted
+        # as 0.0) plus n_pos for visibility.
+        acc = (100 * accuracy_score(all_targets, (all_predictions > 0.5).astype(int))
+               if len(all_targets) else 0.0)
+        return {"auc": float("nan"), "accuracy": acc,
+                "loss": total_loss / max(num_batches, 1),
+                "total_samples": len(all_targets), "n_pos": n_pos}
+    auc = roc_auc_score(all_targets, all_predictions)
     predicted_labels = (all_predictions > 0.5).astype(int)
     accuracy = 100 * accuracy_score(all_targets, predicted_labels)
     avg_loss = total_loss / max(num_batches, 1)
-    return {"auc": auc, "accuracy": accuracy, "loss": avg_loss, "total_samples": len(all_targets)}
+    return {"auc": auc, "accuracy": accuracy, "loss": avg_loss,
+            "total_samples": len(all_targets), "n_pos": n_pos}
 
 
 def set_seed(seed: int):
