@@ -218,11 +218,35 @@ def test_amp_path():
     print("[amp] use_amp=True round completed (forward autocast / loss+score fp32). OK")
 
 
+def test_loss_validation():
+    """A1 guard: resolve_criterion accepts the valid loss names and REJECTS unknown ones
+    (so a typo'd/invalid `loss` fails loudly instead of silently routing to a default).
+    Notably 'bce' is NOT valid and must raise -- it used to silently route to the GMIC loss.
+    """
+    assert BE.resolve_criterion("gmic") is None
+    assert BE.resolve_criterion("gmic_bce") is None
+    assert isinstance(BE.resolve_criterion("cross_entropy"), nn.CrossEntropyLoss)
+    assert isinstance(BE.resolve_criterion("CE"), nn.CrossEntropyLoss)   # case-insensitive
+    # Empty / None = "unspecified" -> safe default to gmic (mirrors method defaulting), not an error.
+    assert BE.resolve_criterion("") is None
+    assert BE.resolve_criterion(None) is None
+    # Genuinely unknown loss names must raise (no silent fallback; 'bce' notably is NOT valid).
+    for bad in ("bce", "bce_with_logits", "mse", "gmicc"):
+        raised = False
+        try:
+            BE.resolve_criterion(bad)
+        except ValueError:
+            raised = True
+        assert raised, f"resolve_criterion({bad!r}) should raise ValueError but did not"
+    print("[loss-validation] valid names resolve; unknown (incl. 'bce') raise ValueError. OK")
+
+
 ALL = [
     test_smoke_all_methods,
     test_fedavg_no_regression,
     test_ditto_persistence_across_rounds,
     test_amp_path,
+    test_loss_validation,
 ]
 
 if __name__ == "__main__":

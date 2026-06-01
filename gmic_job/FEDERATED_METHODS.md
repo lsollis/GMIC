@@ -49,6 +49,21 @@ loss("gmic"), pretrained_weights_path, lambda_l1(1e-5)`. percent_t is set **only
 `percent_t_key` (→ PERCENT_T_DICT; "1"→0.02); a disagreeing `gmic_parameters.percent_t`
 now raises (single source of truth). λ grid: `lambda_global∈{1,5,10} × lambda_local∈{0.01,0.1,0.5}`.
 
+### Config gotchas — read before the sweep
+- **λ flags are inert unless `method=ditto_modulewise`.** `lambda_global/local/fusion` only reach
+  the proximal term for `ditto_modulewise`; `ditto` uses the single `ditto_lambda`; FedAvg/FedProx/
+  FedBN/local use none. **The λ sweep MUST set `method=ditto_modulewise`** — sweeping λ with any
+  other method changes nothing. Each run logs a `[run-config] method=… lambda_…=…` line at round
+  start; check it against the intended config.
+- **`val_split`/`test_split` are IGNORED when `use_predefined_splits=true`** (the default). Splits
+  come from the CSV `split_group` column; the two ratios only apply in the random-split fallback.
+- **`loss` valid values: `gmic`/`gmic_bce` (the real loss) or legacy `cross_entropy`/`ce`.** Any
+  other value (including plain `bce`) raises at init — no silent fallback.
+- Removed dead config keys (no effect, were misleading): `optimizer` block (top-level
+  `lr_heads`/`lr_backbone`/`weight_decay` are the live source), `pretrained_model_index`,
+  `load_checkpoint`, `gmic_parameters.gpu_number`, `results_dir` (dumps go to `output_dir`).
+- `force_preprocessing` is now an explicit client-config flag (was an implicit default).
+
 ## Outputs for offline analysis (per site, in `results_dir`)
 - `{site}_predictions_{tag}_round{R}_{val,test}.csv` — columns
   `site_id, round, method, split, exam_id, view, path, prob_malignant, label`

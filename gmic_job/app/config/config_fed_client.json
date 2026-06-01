@@ -18,6 +18,7 @@
           "image_path": "/workspace/data/XAI_output",
           "input_format": "csv",
           "enable_preprocessing": true,
+          "force_preprocessing": true,
           "cache_validation": true,
           "use_predefined_splits": true,
           "val_split": 0.15,
@@ -31,8 +32,6 @@
 
           "percent_t_key": "1",
           "lambda_l1": 1e-5,
-          "pretrained_model_index": "ensemble",
-          "load_checkpoint": "",
 
           "method": "fedavg",
           "fedprox_mu": 0.01,
@@ -57,7 +56,6 @@
           "gpus": "0,1,2,3",
 
           "gmic_parameters": {
-            "gpu_number": "0,1,2,3",
             "max_crop_noise": [100, 100],
             "max_crop_size_noise": 100,
             "cam_size": [46, 30],
@@ -70,9 +68,7 @@
 
           "loss": "gmic",
           "pos_weight": 3.0,
-          "optimizer": { "name": "adam", "lr": 0.0001, "weight_decay": 1e-6 },
 
-          "results_dir": "/workspace/gmic_results_centralized",
           "log_file": "/workspace/outputs_centralized/executor.log",
           "file_integrity_check": true,
           "fail_on_integrity_error": false,

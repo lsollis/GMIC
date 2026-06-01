@@ -53,6 +53,29 @@ from fl_utils import (
 # Allowed federated methods (selected via the client job config "method" arg).
 VALID_METHODS = ("local", "fedavg", "fedprox", "fedbn", "ditto", "ditto_modulewise")
 
+# Allowed loss values. "gmic"/"gmic_bce" -> native GMIC deep-supervised 3-head malignant
+# BCE + L1 (the correct loss; computed in _compute_task_loss, criterion unused).
+# "cross_entropy"/"ce" -> legacy CrossEntropyLoss fallback. Plain "bce" is NOT valid.
+VALID_LOSSES = ("gmic", "gmic_bce", "cross_entropy", "ce")
+
+
+def resolve_criterion(loss_name: str):
+    """Map a config `loss` string to a criterion (or None for the GMIC path).
+
+    Returns None for gmic/gmic_bce (loss computed in _compute_task_loss), an
+    nn.CrossEntropyLoss for cross_entropy/ce, and raises ValueError on anything else
+    so an unknown loss fails loudly instead of silently routing to a default."""
+    name = (loss_name or "gmic").lower()
+    if name in ("gmic", "gmic_bce"):
+        return None
+    if name in ("cross_entropy", "ce"):
+        return nn.CrossEntropyLoss()
+    raise ValueError(
+        f"Unknown loss '{name}'. Valid: {VALID_LOSSES} "
+        f"('gmic'/'gmic_bce' = native GMIC deep-supervised malignant loss; "
+        f"'cross_entropy'/'ce' = legacy). Plain 'bce' is not supported."
+    )
+
 
 class GMICFederatedExecutor(Executor):
     """NVFLARE Executor mirroring local_train_gmic features (preprocessing, freezing, grouped LR, logging)."""
@@ -466,18 +489,10 @@ class GMICFederatedExecutor(Executor):
         fa.unfreeze_local_last = self.unfreeze_local_last
         apply_freezing_plan(self.model, fa)
 
-        # 7. Loss & optimizer - default to cross-entropy
-        loss_name = (getattr(self, "loss_name", "cross_entropy") or "cross_entropy").lower()
-        if loss_name in ["cross_entropy", "ce"]:
-            self.criterion = nn.CrossEntropyLoss()
-        elif loss_name in ["bce_with_logits", "bce_logits"]:
-            self.criterion = nn.BCEWithLogitsLoss()
-        elif loss_name == "bce":
-            self.criterion = nn.BCELoss()
-        else:
-            # Default fallback for unknown loss types
-            self._logger.warning("[EXEC][WARN] Unknown loss '%s', defaulting to CrossEntropyLoss", loss_name)
-            self.criterion = nn.CrossEntropyLoss()
+        # 7. Loss & optimizer. resolve_criterion validates the loss name and fails loudly on
+        # an unknown value (same pattern as the `method` validation). Returns None for the GMIC
+        # path (loss computed in _compute_task_loss); criterion is unused there.
+        self.criterion = resolve_criterion(getattr(self, "loss_name", "gmic"))
 
         class _OptArgs: pass
         oa = _OptArgs()
@@ -536,6 +551,23 @@ class GMICFederatedExecutor(Executor):
             current_round = int(shareable.get_header(AppConstants.CURRENT_ROUND, 0))
             total_rounds = int(shareable.get_header(AppConstants.NUM_ROUNDS, 1))
             self.log_info(fl_ctx, f"Starting round {current_round}/{total_rounds} - Train+Validate+Test")
+
+            # Per-run config echo so sweep results can be matched to the intended config from
+            # the log. Show only the lambda(s) that are ACTIVE for the selected method.
+            if self.method == "ditto_modulewise":
+                lam_desc = (f"lambda_global={self.lambda_global} lambda_local={self.lambda_local} "
+                            f"lambda_fusion={self.lambda_fusion}")
+            elif self.method == "ditto":
+                lam_desc = f"ditto_lambda={self.ditto_lambda}"
+            elif self.method == "fedprox":
+                lam_desc = f"fedprox_mu={self.fedprox_mu}"
+            else:
+                lam_desc = "(no lambda for this method)"
+            self.log_info(
+                fl_ctx,
+                f"[run-config] method={self.method} use_fedbn={self.use_fedbn} {lam_desc} "
+                f"loss={self.loss_name} pos_weight={self.pos_weight} epochs={self.epochs}"
+            )
 
             # --- receive global model (support both FLModel and legacy raw weights) ---
             incoming = None
@@ -763,7 +795,7 @@ class GMICFederatedExecutor(Executor):
         + lambda_l1*L1(saliency), all on the malignant channel, shared pos_weight.
         Legacy fallback (`loss=cross_entropy`): CrossEntropyLoss on the fusion logits.
         """
-        if (getattr(self, "loss_name", "gmic") or "gmic").lower() in ("gmic", "gmic_bce", "bce"):
+        if (getattr(self, "loss_name", "gmic") or "gmic").lower() in ("gmic", "gmic_bce"):
             return gmic_malignant_loss(
                 outputs, targets, lambda_l1=self.lambda_l1, pos_weight=self.pos_weight
             )
