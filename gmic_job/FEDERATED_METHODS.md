@@ -75,6 +75,21 @@ now raises (single source of truth). λ grid: `lambda_global∈{1,5,10} × lambd
   **round-0 baseline is the cold pretrained model, not the FedAvg-converged global.** Grabbing the
   baseline by mistake is the easy error — it answers a different question (cold-start, not federated).
 
+### `horizontal_flip` column semantics — COUNTERINTUITIVE, do not "fix"
+The flip logic (`data_loader._flip_image` / `loading.flip_image`) is **byte-identical to upstream
+`nyukat/GMIC`**. The column answers "is the source image *already* mirrored?", NOT "should I flip?":
+- **`"NO"` (default, and what all our CSVs use) = the normal GMIC mode that DOES flip** — it mirrors
+  **right**-laterality views (`R-CC`/`R-MLO`) so every breast faces the same way (chest wall on a
+  consistent side), exactly as the pretrained weights expect. With all-`"NO"`, right breasts ARE
+  already standardized. The flip happens **once**, at load (`data_loader.py:_flip_image`); the crop
+  stage does not also mirror (it only picks the chest-wall edge for padding). No double-flip.
+- **`"YES"` = the source PNG is already mirrored** → then it flips the **left** views instead (to undo).
+- **Do NOT set `"YES"` for true-source `R` rows.** That would *stop* flipping right breasts and start
+  flipping left ones — the exact mis-orientation you'd be trying to prevent. Leave the column `"NO"`
+  (or absent → defaults `"NO"`) unless a site's images are pre-mirrored at export. The cold-parity
+  gate on each site validates orientation empirically; if one site's AUC is near-random, that site's
+  PNGs may be pre-mirrored → set `"YES"` for that site only.
+
 ## Clone environment (for running the tests here)
 Not installed by default. Install on demand: CPU `torch`, `nvflare`, `opencv-python-headless`,
 `imageio`, and **pin `numpy<2`** (an opencv install pulls numpy 2.x which breaks anaconda
