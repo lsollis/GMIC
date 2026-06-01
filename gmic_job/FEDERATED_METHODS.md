@@ -60,6 +60,21 @@ now raises (single source of truth). λ grid: `lambda_global∈{1,5,10} × lambd
 - Per-round `[per-site-metric] site=… round=… method=… deployed_val_auc=…` log line.
   Degenerate (zero-positive) eval splits report AUC=NaN (+`n_pos`), excluded from ranking.
 
+### Saliency analysis — read before writing the comparison script
+- **Map orientation:** maps are in the model-input (standardized / chest-wall-flipped) space, NOT
+  raw-DICOM native. The loader flips/orients each image before the forward pass, so the saved map
+  aligns pixel-for-pixel with the image *as the model saw it*. Overlay on the oriented image, not
+  the raw file. (Both saliency channels live at `outputs[3]`; we save the malignant channel `[:,1]`.)
+- **Paired comparison spans two jobs.** Within one job the only same-image pair is Ditto's
+  `{site}_saliency_ditto_round{R}_test.npz` (personalized `v`) vs.
+  `{site}_saliency_pretrained_baseline_round0_test.npz` (round-0 global). A **FedAvg-converged-global
+  vs. personalized** comparison pairs maps **across two separate runs**, joined by `path` (the test
+  split is deterministic — seeded/`split_group` — so `path` keys match across jobs). When building
+  the script, pull the FedAvg-global map from the *FedAvg job's* final-round dump
+  (`{site}_saliency_fedavg_round{last}_test.npz`), NOT the `pretrained_baseline` dump:
+  **round-0 baseline is the cold pretrained model, not the FedAvg-converged global.** Grabbing the
+  baseline by mistake is the easy error — it answers a different question (cold-start, not federated).
+
 ## Clone environment (for running the tests here)
 Not installed by default. Install on demand: CPU `torch`, `nvflare`, `opencv-python-headless`,
 `imageio`, and **pin `numpy<2`** (an opencv install pulls numpy 2.x which breaks anaconda
