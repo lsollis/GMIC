@@ -7,15 +7,15 @@
         "id": "GMICFederatedExecutor",
         "path": "bc_executor.GMICFederatedExecutor",
         "args": {
-          "epochs": 1,
+          "epochs": 40,
           "patience": 4,
           "batch_size": 32,
           "lr_heads": 1e-4,
           "lr_backbone": 1e-5,
           "weight_decay": 1e-6,
 
-          "data_path": "/workspace/data/gmic_format_xai.csv",
-          "image_path": "/workspace/data/XAI_output",
+          "data_path": "/workspace/data/gmic_df_combined_centralized_20260601_134413.csv",
+          "image_path": "/workspace/data/p7_pngs",
           "input_format": "csv",
           "enable_preprocessing": true,
           "force_preprocessing": true,
@@ -33,7 +33,7 @@
           "percent_t_key": "1",
           "lambda_l1": 1e-5,
 
-          "method": "fedavg",
+          "method": "local",
           "fedprox_mu": 0.01,
           "ditto_lambda": 0.1,
           "lambda_global": 1.0,
@@ -53,7 +53,7 @@
           "use_amp": true,
           "grad_accumulation": 1,
           "memory_efficient": true,
-          "gpus": "0,1,2,3",
+          "gpus": "0",
 
           "gmic_parameters": {
             "max_crop_noise": [100, 100],

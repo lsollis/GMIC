@@ -4,22 +4,25 @@ services:
       context: .
       dockerfile: Dockerfile
     container_name: gmic_fl_container
+    network_mode: host
     volumes:
       #- /home/lsollis/Documents/GitHub/GMIC:/workspace
       #- /home/lsollis/Downloads/XAI_output:/workspace/data/XAI_output
       - /raid/home/lsollis/GMIC/GMIC:/workspace
-      - /raid/home/lsollis/data/XAI_output:/workspace/data/XAI_output
+      - /raid/home/lsollis/data/rsna-dataset:/workspace/data/rsna-dataset
+      - /raid/home/lsollis/data/p7_pngs:/workspace/data/p7_pngs
       - /raid/home/lsollis/data/gmic_format_xai.csv:/workspace/data/gmic_format_xai.csv
+      - /raid/home/lsollis/data/p7_xai_covar_250228.csv:/workspace/data/p7_xai_covar_250228.csv
       # Optional mounts for demo/testing - enable as needed
       # - ../GMIC-mods/data:/workspace/data
       # - ../GMIC-mods/demo/input_metadata.csv:/workspace/demo/input_metadata.csv
-    ports:
-      - "8887:8887"   # Jupyter Notebook (optional)
-      - "8102:8102"   # FL API
-      - "8103:8103"   # Admin API
-      - "8443:8443"   # Overseer API
-      - "6006:6006"   # TensorBoard
-      - "8443:8443" # Alternative FL API
+    #ports:
+      # - "8887:8887"   # Jupyter Notebook (optional)
+      # - "8102:8102"   # FL API
+      # - "8103:8103"   # Admin API
+      # - "8443:8443"   # Overseer API
+      # - "6006:6006"   # TensorBoard
+      # - "8443:8443" # Alternative FL API
       #- "5000:5000"   # Optional: FL API / Flask
     shm_size: "128gb"
     gpus: all                                   # <— key line
