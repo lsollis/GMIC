@@ -1220,6 +1220,13 @@ class GMICFederatedExecutor(Executor):
 
         client_name = fl_ctx.get_identity_name()
 
+        # If initialize() failed (e.g. data loader threw), self.data_loader is None. Don't raise
+        # a confusing secondary AttributeError in END_RUN that masks the real initialize() error;
+        # log and return so the original traceback stays the visible one.
+        if self.data_loader is None:
+            self.log_warning(fl_ctx, "[END_RUN] data_loader is None (initialize failed) — skipping final results; see the earlier initialize() error")
+            return
+
         # Final safeguard: if best_metrics are still default zeros, attempt late recovery
         if (self.best_metrics.get('val_auc', 0.0) == 0.0 or self.best_metrics.get('test_auc', 0.0) == 0.0):
             try:

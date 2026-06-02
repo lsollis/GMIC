@@ -420,13 +420,19 @@ class GMICDataLoader:
             for view in VIEWS.LIST:
                 if view in exam and exam[view]:
                     for img_idx, image_identifier in enumerate(exam[view]):
+                        # best_center is INERT (image is pre-standardized to the model window;
+                        # _process_image_to_2944x1920 falls back to image-center when this is None).
+                        # Read defensively: a short/missing best_center list (e.g. a stale cache from
+                        # a pre-neutralization run) must yield None, never IndexError.
+                        bc_for_view = exam.get("best_center", {}).get(view, []) if "best_center" in exam else []
+                        best_center = bc_for_view[img_idx] if img_idx < len(bc_for_view) else None
                         datum = {
                             "exam_id": exam_idx,
                             "image_id": image_identifier,
                             "short_file_path": image_identifier,
                             "view": view,
                             "horizontal_flip": exam["horizontal_flip"],
-                            "best_center": exam.get("best_center", {}).get(view, [None] * len(exam[view]))[img_idx] if "best_center" in exam else None,
+                            "best_center": best_center,
                             "cancer_label": exam["cancer_label"],
                         }
                         if "file_paths" in exam and view in exam["file_paths"] and img_idx < len(exam["file_paths"][view]):
