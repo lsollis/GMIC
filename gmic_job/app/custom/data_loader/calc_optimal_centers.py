@@ -152,10 +152,21 @@ def v_get_topleft_bottomright_partialsum(cumsum, topleft, bottomright):
     """
     tl_x, tl_y = topleft[:, 0], topleft[:, 1]
     br_x, br_y = bottomright[:, 0], bottomright[:, 1]
-    assert np.all(br_x >= tl_x)
-    assert np.all(br_y >= tl_y)
-    assert np.all(br_x <= cumsum.shape[0])
-    assert np.all(br_y <= cumsum.shape[1])
+    # Descriptive guards (logging-only; same conditions as the original bare asserts).
+    # On failure, report WHICH bound broke and the offending tl/br vs the image bounds, so the
+    # masked AssertionError becomes actionable (e.g. confirms a coordinate-frame desync).
+    if not np.all(br_x >= tl_x):
+        i = int(np.argmin(br_x - tl_x))
+        raise AssertionError(f"br_x>=tl_x violated: tl_x={tl_x[i]} br_x={br_x[i]} (i={i}, n={len(tl_x)})")
+    if not np.all(br_y >= tl_y):
+        i = int(np.argmin(br_y - tl_y))
+        raise AssertionError(f"br_y>=tl_y violated: tl_y={tl_y[i]} br_y={br_y[i]} (i={i}, n={len(tl_y)})")
+    if not np.all(br_x <= cumsum.shape[0]):
+        i = int(np.argmax(br_x))
+        raise AssertionError(f"br_x<=H violated: br_x={br_x[i]} H={cumsum.shape[0]} (i={i})")
+    if not np.all(br_y <= cumsum.shape[1]):
+        i = int(np.argmax(br_y))
+        raise AssertionError(f"br_y<=W violated: br_y={br_y[i]} W={cumsum.shape[1]} (i={i})")
 
     length = len(topleft)
     topslice = np.zeros(length)
