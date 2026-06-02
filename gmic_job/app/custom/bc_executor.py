@@ -308,20 +308,27 @@ class GMICFederatedExecutor(Executor):
         cropped_dir = os.path.join(self.output_dir, "cropped_images")
         
         # **NEW: Force preprocessing if flag is set**
+        # Must clear the FULL preprocessing state so the loader rebuilds from scratch.
+        # In particular cropped_exam_list.pkl (the Stage-1 exam list) must go too: if it
+        # survives while cropped_images/ is deleted, the loader sees "Stage 1 done" and
+        # resumes at "Stage2 only" -> center extraction then fails on the missing PNGs and
+        # silently trains WITHOUT best-centers (corrupting the local-module ROI patches).
         if self.force_preprocessing:
             self._logger.warning("[EXEC] force_preprocessing=True: Clearing cached preprocessed data")
             import shutil
-            if os.path.isfile(processed_pkl):
-                os.remove(processed_pkl)
-                self._logger.info("[EXEC] Deleted: %s", processed_pkl)
+            stale_files = [
+                processed_pkl,
+                os.path.join(self.output_dir, "cropped_exam_list.pkl"),         # Stage-1 list
+                os.path.join(self.output_dir, "preprocessing_cache_info.json"),  # cache validator
+                os.path.join(self.output_dir, "preprocessing_progress.json"),    # resume manifest
+            ]
+            for f in stale_files:
+                if os.path.isfile(f):
+                    os.remove(f)
+                    self._logger.info("[EXEC] Deleted: %s", f)
             if os.path.isdir(cropped_dir):
                 shutil.rmtree(cropped_dir, ignore_errors=True)
                 self._logger.info("[EXEC] Deleted: %s", cropped_dir)
-            # Also clear preprocessing cache info
-            cache_info = os.path.join(self.output_dir, "preprocessing_cache_info.json")
-            if os.path.isfile(cache_info):
-                os.remove(cache_info)
-                self._logger.info("[EXEC] Deleted: %s", cache_info)
         
         # Now check for cache (will be empty if force_preprocessing=True)
         if os.path.isfile(processed_pkl) and os.path.isdir(cropped_dir):

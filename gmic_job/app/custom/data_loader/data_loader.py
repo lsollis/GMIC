@@ -169,7 +169,21 @@ class GMICDataLoader:
             else:
                 self._log("Proceeding to rebuild due to integrity failure", level=logging.WARNING)
 
-        if os.path.exists(cropped_list_path):
+        # Only resume at "Stage2 only" if the Stage-1 cropped PNGs actually exist on disk.
+        # Guards the force_preprocessing race (cropped_images/ deleted but cropped_exam_list.pkl
+        # survived) and any cache where the PNGs went missing: resuming there would fail center
+        # extraction and silently train WITHOUT best-centers. If the crops are gone, fall through
+        # to the full pipeline (re-crop) instead. Honors tolerant_missing_metadata to opt out.
+        crops_on_disk = os.path.isdir(cropped_dir) and any(
+            f.lower().endswith(".png") for f in os.listdir(cropped_dir)
+        )
+        if os.path.exists(cropped_list_path) and not crops_on_disk and not self.tolerant_missing_metadata:
+            self._log(
+                f"Stage-1 list present but cropped_images/ is empty/missing ({cropped_dir}); "
+                "cannot resume at Stage2 (center extraction needs the crops). Rebuilding from scratch.",
+                level=logging.WARNING,
+            )
+        elif os.path.exists(cropped_list_path):
             try:
                 cropped_exam_list = pickling.unpickle_from_file(cropped_list_path)
                 if self._cropping_metadata_present(cropped_exam_list):
