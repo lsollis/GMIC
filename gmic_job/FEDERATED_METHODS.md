@@ -105,6 +105,28 @@ The flip logic (`data_loader._flip_image` / `loading.flip_image`) is **byte-iden
   gate on each site validates orientation empirically; if one site's AUC is near-random, that site's
   PNGs may be pre-mirrored → set `"YES"` for that site only.
 
+## Preprocessing: cropping + center (DIVERGES from upstream — read before trusting scale analysis)
+This fork's Stage 1 **resizes+pads** every crop to a fixed 2944×1920 (`resize_and_pad_keep_aspect`).
+Upstream GMIC does NOT — it saves the **raw variable-size crop** and the augmentation does the final
+2944×1920 window crop centered on `best_center`. Two consequences, both verified:
+- **`best_center` is INERT here** (Stage 2 optimal-center search is neutralized → image-center).
+  Proven: (1) the train/eval augmentation output is byte-identical for ANY center once the image
+  already == the model window (`max|diff|=0.0`); (2) the K=6 ROI patches come from the model's
+  saliency map, never `best_center` (no reference in `model/`). Upstream's center is meaningful only
+  because it feeds the variable-crop→window step this fork's resize removed. The optimal-center
+  machinery (`get_optimal_centers`/`calc_optimal_centers`) is KEPT, unimported, recoverable.
+- **Cropping never clips or distorts** the breast: isotropic fit + zero-pad, 100% tissue preserved,
+  aspect ratio exact (verified across thousands of aspect ratios — never clips).
+- **The one real artifact: per-site scale variability.** Padding fraction varies with source aspect
+  ratio (~10–39%), so the breast sits at different scales in the frame, and that variation is
+  **site-correlated** (RSNA vs UHCC differ). This aliases onto the spatial-scale λ-probe / saliency
+  comparison — the paper's second contribution. Stage 1 now logs `[PAD] sid=… pad_frac=…` per image;
+  aggregate the per-site distribution from a run (`grep '\[PAD\]'`).
+- **OPEN DECISION (defer to the padding numbers):** if per-site padding is small/overlapping → keep
+  resize (**C′**, current), delete the center machinery in a follow-up. If sharply site-separated →
+  weigh **B′** (revert to upstream variable-crop + revive the center search — machinery preserved for
+  this) or a scale-normalizing crop (future work). Do NOT delete the center machinery until decided.
+
 ## Clone environment (for running the tests here)
 Not installed by default. Install on demand: CPU `torch`, `nvflare`, `opencv-python-headless`,
 `imageio`, and **pin `numpy<2`** (an opencv install pulls numpy 2.x which breaks anaconda

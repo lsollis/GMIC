@@ -520,6 +520,22 @@ def crop_mammogram_one_image(scan, input_file_path, output_file_path, num_iterat
     # enforce paper size
     mode = image_orientation(scan["horizontal_flip"], scan["side"])
     cropped = image[top:bottom, left:right]
+
+    # [PAD] diagnostic: fraction of the 2944x1920 canvas that is zero-padding introduced by
+    # resize_and_pad (isotropic fit + pad, never clips). Logged per image so the PER-SITE
+    # padding distribution can be aggregated offline (grep '\[PAD\]'). This characterizes the
+    # one real preprocessing artifact of the resize approach -- breast scale varies with the
+    # source aspect ratio, and that variation is site-correlated. Decides resize(C') vs
+    # upstream variable-crop(B') for the spatial-scale analysis. Logging-only.
+    ch, cw = cropped.shape[:2]
+    if ch > 0 and cw > 0:
+        s = min(TARGET_H / ch, TARGET_W / cw)
+        new_h, new_w = int(round(ch * s)), int(round(cw * s))
+        pad_frac = 1.0 - (new_h * new_w) / float(TARGET_H * TARGET_W)
+        _log(logger_fn,
+             f"[PAD] sid={scan.get('short_file_path')} side={scan.get('side')} "
+             f"crop={ch}x{cw} scaled={new_h}x{new_w} pad_frac={pad_frac:.4f}")
+
     final_2944x1920 = resize_and_pad_keep_aspect(cropped, mode)
 
     target_parent_dir = os.path.split(output_file_path)[0]

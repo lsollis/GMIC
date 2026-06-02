@@ -32,7 +32,10 @@ from utilities import pickling, data_handling
 from constants.constants import VIEWS
 import data_loader.augmentations as augmentations
 from data_loader.crop_mammogram import crop_mammogram
-from data_loader.get_optimal_centers import get_optimal_centers
+# NOTE: optimal-center search is currently NEUTRALIZED (see _stage2_extract_centers) because it
+# is inert in this fork's resize+pad pipeline. Import kept so reviving it (B': upstream
+# variable-crop) is a one-line change in Stage 2, not a re-wire. Do not delete the machinery.
+from data_loader.get_optimal_centers import get_optimal_centers  # noqa: F401  (recoverable)
 
 TARGET_H, TARGET_W = 2944, 1920
 
@@ -710,125 +713,48 @@ class GMICDataLoader:
         self._log(f"[CROP] {msg}")
 
     def _stage2_extract_centers(self, cropped_exam_list):
-        self._log("Stage 2: Center extraction")
+        """Stage 2: assign best_center = image center (NEUTRALIZED optimal-center search).
+
+        WHY NEUTRALIZED (not deleted): the optimal-center search is INERT in this fork's
+        resize+pad pipeline -- verified two ways: (1) the train/eval augmentation
+        (random_augmentation_best_center) is byte-identical for ANY center when the saved
+        image already equals the model window 2944x1920 (max|diff|=0.0), and (2) the K=6
+        ROI patches come from the model's saliency map, never from best_center (no
+        best_center reference anywhere in model/). Upstream's center IS meaningful because
+        upstream feeds VARIABLE-size crops and the augmentation does the final centered crop;
+        this fork's added resize_and_pad defeats that. So here best_center only needs to
+        populate the field the validators expect; image-center is provably as good as any value.
+
+        The optimal-center machinery (get_optimal_centers / calc_optimal_centers) is left in
+        the tree, unimported here, RECOVERABLE: if the per-site padding diagnostic shows the
+        resize approach's scale-variability threatens the spatial-scale analysis, we may revert
+        to upstream variable-crop (B'), which needs this machinery back. Decision deferred to
+        the padding numbers; do not delete until then.
+        """
+        self._log("Stage 2: center assignment (image-center; optimal-search neutralized)")
         cropped_list_path = os.path.join(self.output_dir, "cropped_exam_list.pkl")
         output_list_path = os.path.join(self.output_dir, "final_exam_list.pkl")
         pickling.pickle_to_file(cropped_list_path, cropped_exam_list)
 
+        data_list = data_handling.unpack_exam_into_images(cropped_exam_list, cropped=True)
         base_stats = {
             "stage2_centers_assigned": 0,
-            "stage2_images_considered": 0,
+            "stage2_images_considered": len(data_list),
             "stage2_rescue_used": False,
             "stage2_images_dropped": 0,
             "tolerant_mode_used": False,
         }
+        if not data_list:
+            raise RuntimeError("Stage 2: no images available for center assignment")
 
-        try:
-            data_list = data_handling.unpack_exam_into_images(cropped_exam_list, cropped=True)
-            base_stats["stage2_images_considered"] = len(data_list)
-            if not data_list:
-                self._log("No images available for center extraction after filtering", level=logging.WARNING)
-                return cropped_exam_list, base_stats
+        cy, cx = TARGET_H // 2, TARGET_W // 2
+        centers = {d["short_file_path"]: (cy, cx) for d in data_list}
+        data_handling.add_metadata(cropped_exam_list, "best_center", centers)
+        pickling.pickle_to_file(output_list_path, cropped_exam_list)
 
-            self._log(f"Processing {len(data_list)} images for center extraction")
-            centers = get_optimal_centers(
-                data_list=data_list,
-                data_prefix=os.path.join(self.output_dir, "cropped_images"),
-                num_processes=int(self.num_processes),
-            )
-            data_handling.add_metadata(cropped_exam_list, "best_center", centers)
-            pickling.pickle_to_file(output_list_path, cropped_exam_list)
-
-            base_stats["stage2_centers_assigned"] = len(centers)
-            base_stats["stage2_images_dropped"] = max(0, len(data_list) - len(centers))
-            self._log(f"✅ Stage 2 complete: exams={len(cropped_exam_list)} centers_for={len(centers)} images")
-            return cropped_exam_list, base_stats
-
-        except Exception as e:
-            tb_short = traceback.format_exc().splitlines()[-3:]
-            self._log(f"Center extraction failed: {e} | tail_trace={' | '.join(tb_short)}", level=logging.WARNING)
-
-            missing_key = None
-            if isinstance(e, KeyError):
-                missing_key = str(e).strip("'\"")
-
-            if "data_list" not in locals():
-                try:
-                    data_list = data_handling.unpack_exam_into_images(cropped_exam_list, cropped=True)
-                except Exception:
-                    data_list = []
-
-            if data_list:
-                total = len(data_list)
-                base_stats["stage2_images_considered"] = total
-                with_keys = sum(1 for d in data_list if "window_location" in d)
-                without_keys = total - with_keys
-                offenders = [d.get("short_file_path", "?") for d in data_list if "window_location" not in d][:8]
-                self._log(f"[DIAG] data_list size={total} window_location_present={with_keys} missing={without_keys} sample_missing={offenders}", level=logging.WARNING)
-
-                view_counts = {}
-                for d in data_list:
-                    v = d.get("full_view", "?")
-                    view_counts.setdefault(v, {"with": 0, "without": 0})
-                    if "window_location" in d:
-                        view_counts[v]["with"] += 1
-                    else:
-                        view_counts[v]["without"] += 1
-                self._log("[DIAG] per_view_window_location=" + ",".join(f"{v}:{c['with']}/{c['with']+c['without']}" for v, c in view_counts.items()), level=logging.WARNING)
-
-                if missing_key == "window_location":
-                    exams_missing = sum(1 for ex in cropped_exam_list if "window_location" not in ex)
-                    self._log(f"[DIAG] exams_missing_window_location_field={exams_missing}/{len(cropped_exam_list)}", level=logging.WARNING)
-
-            # Rescue attempt
-            try:
-                try:
-                    data_list  # noqa: F821
-                except NameError:
-                    data_list = data_handling.unpack_exam_into_images(cropped_exam_list, cropped=True)
-
-                if not data_list:
-                    self._log("[RESCUE] data_list empty – skipping centers.", level=logging.WARNING)
-                    base_stats["stage2_rescue_used"] = True
-                    base_stats["stage2_images_dropped"] = base_stats["stage2_images_considered"]
-                    return cropped_exam_list, base_stats
-
-                required_keys = {"short_file_path"}
-                filtered = []
-                dropped = []
-                for d in data_list:
-                    if all(k in d for k in required_keys) and "window_location" in d:
-                        filtered.append(d)
-                    else:
-                        dropped.append(d.get("short_file_path", "UNKNOWN"))
-
-                self._log(f"[RESCUE] attempting with filtered images: kept={len(filtered)} dropped_missing_window={len(dropped)}", level=logging.WARNING)
-                if not filtered:
-                    self._log("[RESCUE] nothing left after filtering – skipping centers.", level=logging.WARNING)
-                    base_stats["stage2_rescue_used"] = True
-                    base_stats["stage2_images_dropped"] = base_stats["stage2_images_considered"]
-                    return cropped_exam_list, base_stats
-
-                centers = get_optimal_centers(
-                    data_list=filtered,
-                    data_prefix=os.path.join(self.output_dir, "cropped_images"),
-                    num_processes=int(self.num_processes),
-                )
-                data_handling.add_metadata(cropped_exam_list, "best_center", centers)
-                pickling.pickle_to_file(output_list_path, cropped_exam_list)
-
-                base_stats["stage2_rescue_used"] = True
-                base_stats["stage2_centers_assigned"] = len(centers)
-                base_stats["stage2_images_dropped"] = base_stats["stage2_images_considered"] - len(centers)
-                self._log(f"✅ Stage 2 partial complete: exams={len(cropped_exam_list)} centers_for={len(centers)} images (dropped={len(dropped)})", level=logging.WARNING)
-                return cropped_exam_list, base_stats
-
-            except Exception as e2:
-                self._log(f"[RESCUE] center extraction still failed: {e2}", level=logging.WARNING)
-                self._log("Proceeding without centers (training will continue; downstream modules should handle missing 'best_center').", level=logging.WARNING)
-                base_stats["stage2_rescue_used"] = True
-                base_stats["stage2_images_dropped"] = base_stats["stage2_images_considered"]
-                return cropped_exam_list, base_stats
+        base_stats["stage2_centers_assigned"] = len(centers)
+        self._log(f"✅ Stage 2 complete: assigned image-center ({cy},{cx}) to {len(centers)} images")
+        return cropped_exam_list, base_stats
 
     # -------------- Info & Stats --------------
     def get_split_info(self):
