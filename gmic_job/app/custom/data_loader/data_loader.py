@@ -677,7 +677,7 @@ class GMICDataLoader:
                 num_iterations=100,
                 buffer_size=50,
                 error_log_path=os.path.join(cropped_dir, "crop_failures.txt"),
-                logger=self._crop_logger,
+                logger_fn=self._crop_logger,
             )
             cropped_exam_list = pickling.unpickle_from_file(cropped_list_path)
             self._assert_cropped_schema(cropped_exam_list)
