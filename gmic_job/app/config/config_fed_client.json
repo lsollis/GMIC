@@ -76,6 +76,7 @@
           "scheduler_patience": 2,
           "min_lr": 0.0,
           "decision_threshold": 0.5,
+          "eval_threshold_sweep": [0.3, 0.4, 0.5, 0.6, 0.7],
           "freeze_backbone_epochs": 0,
 
           "log_file": "/workspace/outputs_centralized/executor.log",

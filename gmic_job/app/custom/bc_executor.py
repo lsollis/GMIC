@@ -172,6 +172,7 @@ class GMICFederatedExecutor(Executor):
             min_lr: float = 0.0,                  # scheduler floor
             cosine_t_max: int = 0,                # cosine period (0 -> epochs)
             decision_threshold: float = 0.5,      # operating point for acc/sens/spec/precision
+            eval_threshold_sweep=None,            # sweep thresholds (default [.3,.4,.5,.6,.7]); on
             freeze_backbone_epochs: int = 0,      # keep backbones frozen for first N epochs
         ):
             """GMIC Federated Executor (feature parity with local trainer)."""
@@ -289,6 +290,8 @@ class GMICFederatedExecutor(Executor):
             self.min_lr = float(min_lr)
             self.cosine_t_max = int(cosine_t_max)
             self.decision_threshold = float(decision_threshold)
+            self.eval_threshold_sweep = (list(eval_threshold_sweep)
+                                         if eval_threshold_sweep else [0.3, 0.4, 0.5, 0.6, 0.7])
             self.freeze_backbone_epochs = int(freeze_backbone_epochs)
             # Guardrail: balanced sampler + a large pos_weight double-counts the imbalance
             # correction (sampler evens the batch mix AND the loss up-weights positives).
@@ -613,6 +616,7 @@ class GMICFederatedExecutor(Executor):
                 f"loss={self.loss_name} pos_weight={self.pos_weight} epochs={self.epochs} "
                 f"lr_heads={self.lr_heads} balanced_sampler={self.use_balanced_sampler} "
                 f"lr_scheduler={self.lr_scheduler_name} decision_threshold={self.decision_threshold} "
+                f"eval_threshold_sweep={self.eval_threshold_sweep} "
                 f"freeze_backbone_epochs={self.freeze_backbone_epochs}"
                 + (f" focal(gamma={self.focal_gamma},alpha={self.focal_alpha})" if self.loss_name == "focal" else "")
             )
@@ -1060,7 +1064,8 @@ class GMICFederatedExecutor(Executor):
         """
         eval_model = model if model is not None else self.model
         core = evaluate_model(eval_model, self.data_loader, self.criterion, self.device,
-                              split=split, decision_threshold=self.decision_threshold)
+                              split=split, decision_threshold=self.decision_threshold,
+                              eval_threshold_sweep=self.eval_threshold_sweep)
         out = {
             "auc": float(core["auc"]),
             "accuracy": float(core["accuracy"]),
@@ -1077,6 +1082,17 @@ class GMICFederatedExecutor(Executor):
             f"Loss {out['loss']:.4f} | @thr={self.decision_threshold:.2f} "
             f"Sens {out['sensitivity']:.4f} Spec {out['specificity']:.4f} Prec {out['precision']:.4f}"
         )
+        # Additive operating-point sweep (greppable; denominators logged so small-n noise is
+        # judgeable). Does NOT affect selection/early-stop/saved-best — logging only.
+        n_pos = int(core.get("n_pos", 0))
+        n_neg = int(core.get("n_neg", 0))
+        for sw in core.get("sweep", []):
+            self.log_info(
+                fl_ctx,
+                f"[threshold-sweep] split={split} thr={sw['threshold']:.2f} "
+                f"sens={sw['sensitivity']:.4f} spec={sw['specificity']:.4f} prec={sw['precision']:.4f} "
+                f"n_flagged={sw['n_flagged']} n_pos={n_pos} n_neg={n_neg}"
+            )
         return out
 
 

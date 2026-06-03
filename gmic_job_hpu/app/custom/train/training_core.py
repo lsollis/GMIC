@@ -268,12 +268,19 @@ def apply_freezing_plan(model: nn.Module, args):
 
 
 def evaluate_model(model: nn.Module, data_loader, criterion, device, split="val",
-                   decision_threshold: float = 0.5):
+                   decision_threshold: float = 0.5, eval_threshold_sweep=None):
     """Evaluate model and return metrics dict.
 
     AUC is threshold-independent. accuracy/sensitivity/specificity/precision are computed at
     `decision_threshold` (default 0.5) so the operating point can be moved without retraining.
+
+    eval_threshold_sweep: optional list of thresholds (default [.3,.4,.5,.6,.7]). When set,
+    the returned dict carries a "sweep" list of per-threshold {threshold, sensitivity,
+    specificity, precision, n_flagged} computed from the SAME in-memory probs+labels (no extra
+    forward passes). Purely additive context; never affects selection/early-stop/saved-best.
     """
+    if eval_threshold_sweep is None:
+        eval_threshold_sweep = [0.3, 0.4, 0.5, 0.6, 0.7]
     model.eval()
     all_predictions, all_targets = [], []
     total_loss, num_batches = 0.0, 0
@@ -301,6 +308,16 @@ def evaluate_model(model: nn.Module, data_loader, criterion, device, split="val"
     from fl_utils import classification_metrics
     m = classification_metrics(all_targets, all_predictions, threshold=thr)
     m["loss"] = avg_loss
+    # Additive operating-point sweep (same probs+labels; does not touch AUC or selection).
+    n_neg = int((all_targets == 0).sum()) if len(all_targets) else 0
+    m["n_neg"] = n_neg
+    sweep = []
+    for s_thr in eval_threshold_sweep:
+        sm = classification_metrics(all_targets, all_predictions, threshold=s_thr)
+        sm["n_flagged"] = int((all_predictions > float(s_thr)).sum()) if len(all_predictions) else 0
+        sweep.append({k: sm[k] for k in
+                      ("threshold", "sensitivity", "specificity", "precision", "n_flagged")})
+    m["sweep"] = sweep
     return m
 
 

@@ -213,6 +213,28 @@ def test_threshold_metrics():
           f"sens@.8={m08['sensitivity']:.2f} spec@.8={m08['specificity']:.2f}")
 
 
+def test_threshold_sweep():
+    """Sweep sanity: n_flagged is monotonic non-increasing as threshold rises; denominators
+    (n_pos+n_neg) sum to the eval-set size. Built from classification_metrics like the executor."""
+    import numpy as np
+    y = np.array([0, 0, 0, 0, 0, 1, 1, 1])          # 5 neg, 3 pos
+    p = np.array([0.05, 0.2, 0.35, 0.5, 0.65, 0.4, 0.7, 0.95])
+    thrs = [0.3, 0.4, 0.5, 0.6, 0.7]
+    flagged = []
+    for thr in thrs:
+        m = F.classification_metrics(y, p, threshold=thr)
+        nf = int((p > thr).sum())
+        flagged.append(nf)
+        # denominators sum to eval-set size
+        assert m["n_pos"] + (m["total_samples"] - m["n_pos"]) == len(y)
+    # monotonic non-increasing as threshold increases (fewer flagged at higher thr)
+    assert all(flagged[i] >= flagged[i + 1] for i in range(len(flagged) - 1)), flagged
+    # and n_pos is threshold-independent
+    n_pos_vals = {F.classification_metrics(y, p, threshold=t)["n_pos"] for t in thrs}
+    assert n_pos_vals == {3}
+    print(f"[threshold-sweep] OK n_flagged monotonic {flagged} (thr {thrs}); denominators sum to {len(y)}")
+
+
 def test_balanced_sampler_order():
     """Balanced index resampling: heavily-imbalanced pool -> ~even class mix in the drawn order."""
     import numpy as np
@@ -323,6 +345,7 @@ ALL = [
     test_gmic_loss,
     test_focal_loss,
     test_threshold_metrics,
+    test_threshold_sweep,
     test_balanced_sampler_order,
     test_scheduler_selection,
     test_amp_loss_boundary,
