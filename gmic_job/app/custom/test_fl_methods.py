@@ -173,6 +173,88 @@ def test_gmic_loss():
     print(f"[gmic_loss] OK loss={float(loss):.4f} (pw1={l_pw1:.4f} pw10={l_pw10:.4f})")
 
 
+def test_focal_loss():
+    """Focal loss: same 3-head+L1 structure; gamma/alpha change it; backprops to fusion head."""
+    m = build_model().train()
+    x = torch.randn(2, 1, 2944, 1920)
+    t = torch.tensor([0, 1])
+    out = m(x)
+    l_g0 = float(F.gmic_focal_loss(out, t, gamma=0.0, alpha=0.25))   # gamma=0 -> weighted BCE
+    l_g2 = float(F.gmic_focal_loss(out, t, gamma=2.0, alpha=0.25))
+    assert l_g0 != l_g2, (l_g0, l_g2)                                 # gamma matters
+    l_a = float(F.gmic_focal_loss(out, t, gamma=2.0, alpha=0.75))
+    assert l_a != l_g2                                                # alpha matters
+    loss = F.gmic_focal_loss(out, t, gamma=2.0, alpha=0.25)
+    assert torch.isfinite(loss) and float(loss) > 0
+    loss.backward()
+    g = dict(m.named_parameters())["fusion_dnn.weight"].grad
+    assert g is not None and torch.isfinite(g).all() and float(g.abs().sum()) > 0
+    print(f"[focal] OK loss={float(loss):.4f} (g0={l_g0:.4f} g2={l_g2:.4f} a.75={l_a:.4f})")
+
+
+def test_threshold_metrics():
+    """classification_metrics: AUC threshold-free; sens/spec/precision move with threshold."""
+    import numpy as np
+    y = np.array([0, 0, 0, 0, 1, 1])
+    p = np.array([0.1, 0.2, 0.45, 0.6, 0.55, 0.9])
+    m05 = F.classification_metrics(y, p, threshold=0.5)
+    m08 = F.classification_metrics(y, p, threshold=0.8)
+    assert abs(m05["auc"] - m08["auc"]) < 1e-9, "AUC must be threshold-independent"
+    # raising the threshold cannot increase sensitivity (fewer predicted positives)
+    assert m08["sensitivity"] <= m05["sensitivity"] + 1e-9
+    # and cannot decrease specificity
+    assert m08["specificity"] >= m05["specificity"] - 1e-9
+    # at 0.5: preds>0.5 = [.6,.55,.9] -> tp=2 (.55,.9), fp=1 (.6) ; sens=2/2, spec=3/4
+    assert abs(m05["sensitivity"] - 1.0) < 1e-9 and abs(m05["specificity"] - 0.75) < 1e-9
+    # degenerate (single class) -> AUC NaN
+    import math
+    assert math.isnan(F.classification_metrics(np.array([0, 0]), np.array([0.3, 0.7]))["auc"])
+    print(f"[threshold] OK sens@.5={m05['sensitivity']:.2f} spec@.5={m05['specificity']:.2f} "
+          f"sens@.8={m08['sensitivity']:.2f} spec@.8={m08['specificity']:.2f}")
+
+
+def test_balanced_sampler_order():
+    """Balanced index resampling: heavily-imbalanced pool -> ~even class mix in the drawn order."""
+    import numpy as np
+    sys.path.insert(0, THIS_DIR)
+    from data_loader.data_loader import GMICDataLoader
+    # build a loader without running __init__ (avoids preprocessing); call the method directly
+    dl = GMICDataLoader.__new__(GMICDataLoader)
+    samples = ([{"view_level_label": 1}] * 10) + ([{"view_level_label": 0}] * 90)  # 9:1 neg-heavy
+    rng = np.random.RandomState(0)
+    order = dl._balanced_index_order(samples, rng)
+    labels = np.array([samples[i]["view_level_label"] for i in order])
+    pos_frac = labels.mean()
+    assert len(order) == len(samples), "epoch size must be preserved"
+    assert 0.4 <= pos_frac <= 0.6, f"expected ~balanced draw, got pos_frac={pos_frac:.2f}"
+    # degenerate single-class pool -> identity order (nothing to balance)
+    order2 = dl._balanced_index_order([{"view_level_label": 0}] * 5, np.random.RandomState(0))
+    assert order2 == list(range(5))
+    print(f"[sampler] OK 9:1 pool -> drawn pos_frac={pos_frac:.2f} (len preserved)")
+
+
+def test_scheduler_selection():
+    """configure_optimizers honors lr_scheduler: None->plateau (back-compat), cosine, none."""
+    import torch.optim as optim
+    from train.training_core import configure_optimizers
+    m = build_model()
+
+    class OA:
+        lr_heads = 3e-5; lr_backbone = 1e-5; weight_decay = 1e-6; patience = 4
+        scheduler_patience = 2; min_lr = 0.0; epochs = 40
+    oa = OA()
+    oa.lr_scheduler = None
+    _, s_default, _ = configure_optimizers(m, oa)
+    assert isinstance(s_default, optim.lr_scheduler.ReduceLROnPlateau), "None must keep plateau (back-compat)"
+    oa.lr_scheduler = "cosine"
+    _, s_cos, _ = configure_optimizers(m, oa)
+    assert isinstance(s_cos, optim.lr_scheduler.CosineAnnealingLR)
+    oa.lr_scheduler = "none"
+    _, s_none, _ = configure_optimizers(m, oa)
+    assert s_none is None
+    print("[scheduler] OK None->plateau(back-compat), cosine->CosineAnnealingLR, none->None")
+
+
 def test_ditto_persistence():
     """v is initialized once and continues across rounds (never reset to global)."""
     w = build_model()
@@ -239,6 +321,10 @@ ALL = [
     test_pretrained_load,
     test_forward_smoke,
     test_gmic_loss,
+    test_focal_loss,
+    test_threshold_metrics,
+    test_balanced_sampler_order,
+    test_scheduler_selection,
     test_amp_loss_boundary,
     test_earlystopper_reset,
     test_ditto_persistence,

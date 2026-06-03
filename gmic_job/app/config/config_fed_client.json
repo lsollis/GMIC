@@ -10,7 +10,7 @@
           "epochs": 40,
           "patience": 4,
           "batch_size": 32,
-          "lr_heads": 1e-4,
+          "lr_heads": 3e-5,
           "lr_backbone": 1e-5,
           "weight_decay": 1e-6,
 
@@ -18,7 +18,7 @@
           "image_path": "/workspace/data/p7_pngs",
           "input_format": "csv",
           "enable_preprocessing": true,
-          "force_preprocessing": true,
+          "force_preprocessing": false,
           "cache_validation": true,
           "use_predefined_splits": true,
           "val_split": 0.15,
@@ -67,7 +67,16 @@
           },
 
           "loss": "gmic",
-          "pos_weight": 3.0,
+          "pos_weight": 6.5,
+
+          "use_balanced_sampler": false,
+          "focal_gamma": 2.0,
+          "focal_alpha": 0.25,
+          "lr_scheduler": null,
+          "scheduler_patience": 2,
+          "min_lr": 0.0,
+          "decision_threshold": 0.5,
+          "freeze_backbone_epochs": 0,
 
           "log_file": "/workspace/outputs_centralized/executor.log",
           "file_integrity_check": true,

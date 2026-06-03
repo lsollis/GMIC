@@ -46,6 +46,7 @@ from fl_utils import (
     clone_detached_state,
     tolerant_load_pretrained,
     gmic_malignant_loss,
+    gmic_focal_loss,
     malignant_score,
     gmic_outputs,
 )
@@ -54,25 +55,26 @@ from fl_utils import (
 VALID_METHODS = ("local", "fedavg", "fedprox", "fedbn", "ditto", "ditto_modulewise")
 
 # Allowed loss values. "gmic"/"gmic_bce" -> native GMIC deep-supervised 3-head malignant
-# BCE + L1 (the correct loss; computed in _compute_task_loss, criterion unused).
-# "cross_entropy"/"ce" -> legacy CrossEntropyLoss fallback. Plain "bce" is NOT valid.
-VALID_LOSSES = ("gmic", "gmic_bce", "cross_entropy", "ce")
+# BCE + L1 (criterion unused; computed in _compute_task_loss). "focal" -> same 3-head
+# structure with focal BCE (criterion unused). "cross_entropy"/"ce" -> legacy CrossEntropyLoss.
+# Plain "bce" is NOT valid.
+VALID_LOSSES = ("gmic", "gmic_bce", "focal", "cross_entropy", "ce")
 
 
 def resolve_criterion(loss_name: str):
-    """Map a config `loss` string to a criterion (or None for the GMIC path).
+    """Map a config `loss` string to a criterion (or None for the GMIC/focal paths).
 
-    Returns None for gmic/gmic_bce (loss computed in _compute_task_loss), an
+    Returns None for gmic/gmic_bce/focal (loss computed in _compute_task_loss), an
     nn.CrossEntropyLoss for cross_entropy/ce, and raises ValueError on anything else
     so an unknown loss fails loudly instead of silently routing to a default."""
     name = (loss_name or "gmic").lower()
-    if name in ("gmic", "gmic_bce"):
+    if name in ("gmic", "gmic_bce", "focal"):
         return None
     if name in ("cross_entropy", "ce"):
         return nn.CrossEntropyLoss()
     raise ValueError(
         f"Unknown loss '{name}'. Valid: {VALID_LOSSES} "
-        f"('gmic'/'gmic_bce' = native GMIC deep-supervised malignant loss; "
+        f"('gmic'/'gmic_bce' = native GMIC malignant loss; 'focal' = focal BCE variant; "
         f"'cross_entropy'/'ce' = legacy). Plain 'bce' is not supported."
     )
 
@@ -161,6 +163,16 @@ class GMICFederatedExecutor(Executor):
             local_epochs: int | None = None,      # alias/override for `epochs`
             pretrained_weights_path: str = "",    # falls back to model_path if empty
             pos_weight: float = 3.0,              # malignant-class weight for GMIC BCE
+            # ---- Imbalance / overfitting levers (all default to current/off behavior) ----
+            use_balanced_sampler: bool = False,   # view-level class-balanced batch sampling
+            focal_gamma: float = 2.0,             # used when loss=="focal"
+            focal_alpha: float = 0.25,            # used when loss=="focal"
+            lr_scheduler: str | None = None,      # None/"plateau"(default)/"cosine"/"none"
+            scheduler_patience: int = 2,          # ReduceLROnPlateau patience
+            min_lr: float = 0.0,                  # scheduler floor
+            cosine_t_max: int = 0,                # cosine period (0 -> epochs)
+            decision_threshold: float = 0.5,      # operating point for acc/sens/spec/precision
+            freeze_backbone_epochs: int = 0,      # keep backbones frozen for first N epochs
         ):
             """GMIC Federated Executor (feature parity with local trainer)."""
             super().__init__()
@@ -268,6 +280,24 @@ class GMICFederatedExecutor(Executor):
             }
             self.use_fedbn = bool(use_fedbn)
             self.pos_weight = float(pos_weight)
+            # ---- Imbalance / overfitting levers ----
+            self.use_balanced_sampler = bool(use_balanced_sampler)
+            self.focal_gamma = float(focal_gamma)
+            self.focal_alpha = float(focal_alpha)
+            self.lr_scheduler_name = lr_scheduler
+            self.scheduler_patience = int(scheduler_patience)
+            self.min_lr = float(min_lr)
+            self.cosine_t_max = int(cosine_t_max)
+            self.decision_threshold = float(decision_threshold)
+            self.freeze_backbone_epochs = int(freeze_backbone_epochs)
+            # Guardrail: balanced sampler + a large pos_weight double-counts the imbalance
+            # correction (sampler evens the batch mix AND the loss up-weights positives).
+            if self.use_balanced_sampler and self.pos_weight > 2.0:
+                self._logger.warning(
+                    "[EXEC][WARN] use_balanced_sampler=True AND pos_weight=%.2f (>2.0): these "
+                    "STACK the imbalance correction and may over-correct toward positives. "
+                    "Consider pos_weight~1.0 when the balanced sampler is on.", self.pos_weight
+                )
             self.pretrained_weights_path = pretrained_weights_path or ""
             if local_epochs is not None:
                 self.epochs = int(local_epochs)
@@ -366,6 +396,7 @@ class GMICFederatedExecutor(Executor):
             tolerant_missing_metadata=self.tolerant_missing_metadata,
             file_integrity_check=self.file_integrity_check,
             fail_on_integrity_error=self.fail_on_integrity_error,
+            use_balanced_sampler=self.use_balanced_sampler,
         )
         self.data_loader.print_summary()
 
@@ -507,6 +538,12 @@ class GMICFederatedExecutor(Executor):
         oa.lr_backbone = self.lr_backbone
         oa.weight_decay = self.weight_decay
         oa.patience = self.patience
+        # Scheduler selection (None -> historical ReduceLROnPlateau; preserves current behavior)
+        oa.lr_scheduler = self.lr_scheduler_name
+        oa.scheduler_patience = self.scheduler_patience
+        oa.min_lr = self.min_lr
+        oa.cosine_t_max = self.cosine_t_max
+        oa.epochs = self.epochs
         self.optimizer, self.scheduler, self.early_stopper = configure_optimizers(self.model, oa)
         # Stash optimizer args so the Ditto personal model `v` can build its own optimizer.
         self._opt_args = oa
@@ -573,7 +610,11 @@ class GMICFederatedExecutor(Executor):
             self.log_info(
                 fl_ctx,
                 f"[run-config] method={self.method} use_fedbn={self.use_fedbn} {lam_desc} "
-                f"loss={self.loss_name} pos_weight={self.pos_weight} epochs={self.epochs}"
+                f"loss={self.loss_name} pos_weight={self.pos_weight} epochs={self.epochs} "
+                f"lr_heads={self.lr_heads} balanced_sampler={self.use_balanced_sampler} "
+                f"lr_scheduler={self.lr_scheduler_name} decision_threshold={self.decision_threshold} "
+                f"freeze_backbone_epochs={self.freeze_backbone_epochs}"
+                + (f" focal(gamma={self.focal_gamma},alpha={self.focal_alpha})" if self.loss_name == "focal" else "")
             )
 
             # --- receive global model (support both FLModel and legacy raw weights) ---
@@ -798,16 +839,53 @@ class GMICFederatedExecutor(Executor):
     def _compute_task_loss(self, outputs, targets):
         """Task loss on the malignant head (native GMIC deep-supervised BCE + L1).
 
-        Default path (`loss=gmic`): BCEWithLogits(fusion) + BCE(global) + BCE(local)
-        + lambda_l1*L1(saliency), all on the malignant channel, shared pos_weight.
-        Legacy fallback (`loss=cross_entropy`): CrossEntropyLoss on the fusion logits.
+        `loss=gmic`/`gmic_bce`: BCEWithLogits(fusion)+BCE(global)+BCE(local)+lambda_l1*L1,
+            malignant channel, shared pos_weight.
+        `loss=focal`: same 3-head + L1 structure with FOCAL BCE (focal_gamma/focal_alpha).
+        `loss=cross_entropy`/`ce`: legacy CrossEntropyLoss on the fusion logits.
         """
-        if (getattr(self, "loss_name", "gmic") or "gmic").lower() in ("gmic", "gmic_bce"):
+        name = (getattr(self, "loss_name", "gmic") or "gmic").lower()
+        if name == "focal":
+            return gmic_focal_loss(
+                outputs, targets, lambda_l1=self.lambda_l1,
+                gamma=self.focal_gamma, alpha=self.focal_alpha,
+            )
+        if name in ("gmic", "gmic_bce"):
             return gmic_malignant_loss(
                 outputs, targets, lambda_l1=self.lambda_l1, pos_weight=self.pos_weight
             )
         fusion_logits = outputs[0] if isinstance(outputs, (tuple, list)) else outputs
         return self.criterion(fusion_logits, targets)
+
+
+    def _apply_backbone_freeze(self, fl_ctx, frozen: bool):
+        """Toggle requires_grad on the global+local backbones (freeze_backbone_epochs lever).
+
+        Idempotent; logs only on a state change. Heads stay trainable throughout.
+        """
+        if getattr(self, "_backbone_frozen", None) == frozen:
+            return
+        mdl = self._underlying
+        for attr in ("global_backbone", "local_backbone"):
+            bb = getattr(mdl, attr, None)
+            if bb is not None and hasattr(bb, "parameters"):
+                for p in bb.parameters():
+                    p.requires_grad = not frozen
+        self._backbone_frozen = frozen
+        self.log_info(fl_ctx, f"[freeze] backbones {'FROZEN' if frozen else 'UNFROZEN'} (heads always trainable)")
+
+    def _scheduler_step(self, val_auc):
+        """Step the LR scheduler, tolerating plateau (needs metric) vs cosine/step (no metric)."""
+        sched = getattr(self, "scheduler", None)
+        if sched is None:
+            return
+        try:
+            if isinstance(sched, optim.lr_scheduler.ReduceLROnPlateau):
+                sched.step(val_auc)
+            else:
+                sched.step()
+        except Exception as e:
+            self._logger.warning("[scheduler] step failed: %s", e)
 
 
     def _local_train(self, fl_ctx, abort_signal, shareable: Shareable):
@@ -837,6 +915,11 @@ class GMICFederatedExecutor(Executor):
             epoch_preds = []
             epoch_targets = []
             self.log_info(fl_ctx, f"Training epoch {epoch + 1}/{self.epochs}")
+
+            # Backbone freeze lever: keep backbones frozen for the first N epochs, then unfreeze
+            # once (anti-overfitting warmup). No-op when freeze_backbone_epochs==0 (default).
+            if self.freeze_backbone_epochs > 0:
+                self._apply_backbone_freeze(fl_ctx, frozen=(epoch < self.freeze_backbone_epochs))
 
             for batch_idx, (inputs, targets, metadata) in enumerate(self.data_loader.get_batch_iterator('train')):
                 if abort_signal.triggered:
@@ -930,10 +1013,9 @@ class GMICFederatedExecutor(Executor):
             if has_val:
                 val_metrics = self._evaluate_model(fl_ctx, split='val')
                 val_auc = val_metrics['auc']
-                try:
-                    self.scheduler.step(val_auc)
-                except Exception:
-                    pass
+                # plateau scheduler steps on val_auc; cosine (and others) step without a metric;
+                # None scheduler -> no-op. Handle all three.
+                self._scheduler_step(val_auc)
                 if self.early_stopper.step(val_auc, self.model):
                     round_best_val = val_auc
                 if self.early_stopper.should_stop():
@@ -977,14 +1059,24 @@ class GMICFederatedExecutor(Executor):
         model (e.g. the Ditto personal model v) to evaluate it instead.
         """
         eval_model = model if model is not None else self.model
-        core = evaluate_model(eval_model, self.data_loader, self.criterion, self.device, split=split)
+        core = evaluate_model(eval_model, self.data_loader, self.criterion, self.device,
+                              split=split, decision_threshold=self.decision_threshold)
         out = {
             "auc": float(core["auc"]),
             "accuracy": float(core["accuracy"]),
             "loss": float(core["loss"]),
             "samples": int(core.get("total_samples", 0)),
+            # operating-point metrics at decision_threshold (AUC stays threshold-free)
+            "sensitivity": float(core.get("sensitivity", float("nan"))),
+            "specificity": float(core.get("specificity", float("nan"))),
+            "precision": float(core.get("precision", float("nan"))),
         }
-        self.log_info(fl_ctx, f"{split.capitalize()} evaluation - AUC {out['auc']:.4f} Acc {out['accuracy']:.2f}% Loss {out['loss']:.4f}")
+        self.log_info(
+            fl_ctx,
+            f"{split.capitalize()} evaluation - AUC {out['auc']:.4f} Acc {out['accuracy']:.2f}% "
+            f"Loss {out['loss']:.4f} | @thr={self.decision_threshold:.2f} "
+            f"Sens {out['sensitivity']:.4f} Spec {out['specificity']:.4f} Prec {out['precision']:.4f}"
+        )
         return out
 
 

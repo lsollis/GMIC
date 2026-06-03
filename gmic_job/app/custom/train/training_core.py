@@ -219,9 +219,32 @@ def configure_optimizers(model: nn.Module, args):
         param_groups = [{"params": [p for p in model.parameters() if p.requires_grad], "lr": args.lr_heads}]
 
     optimizer = optim.Adam(param_groups, weight_decay=getattr(args, "weight_decay", 1e-5))
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode="max", factor=0.2, patience=2
-    )
+
+    # Scheduler selection (args.lr_scheduler):
+    #   None / "" / "plateau" -> ReduceLROnPlateau(mode=max on val_auc). None keeps the
+    #       historical default so current behavior is unchanged when the option is unset.
+    #   "cosine" -> CosineAnnealingLR over args.cosine_t_max (default = epochs).
+    #   "none" (explicit string) -> no scheduler (returns None).
+    # scheduler.step() in the train loop is wrapped so a cosine sched (steps w/o metric) and
+    # a plateau sched (steps w/ val_auc) and None all work.
+    sched_name = getattr(args, "lr_scheduler", None)
+    sched_name = (str(sched_name).lower() if sched_name is not None else None)
+    sp = int(getattr(args, "scheduler_patience", 2))
+    min_lr = float(getattr(args, "min_lr", 0.0))
+    if sched_name in (None, "", "plateau"):
+        scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer, mode="max", factor=0.2, patience=sp, min_lr=min_lr
+        )
+    elif sched_name == "cosine":
+        t_max = int(getattr(args, "cosine_t_max", 0)) or int(getattr(args, "epochs", 40))
+        scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=t_max, eta_min=min_lr)
+    elif sched_name == "none":
+        scheduler = None
+    else:
+        logger.warning("[optim] unknown lr_scheduler '%s'; using ReduceLROnPlateau", sched_name)
+        scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer, mode="max", factor=0.2, patience=sp, min_lr=min_lr
+        )
     early_stopper = EarlyStopper(patience=getattr(args, "patience", 4))
     return optimizer, scheduler, early_stopper
 
@@ -244,8 +267,13 @@ def apply_freezing_plan(model: nn.Module, args):
                     p.requires_grad = False
 
 
-def evaluate_model(model: nn.Module, data_loader, criterion, device, split="val"):
-    """Evaluate model and return simple metrics dict."""
+def evaluate_model(model: nn.Module, data_loader, criterion, device, split="val",
+                   decision_threshold: float = 0.5):
+    """Evaluate model and return metrics dict.
+
+    AUC is threshold-independent. accuracy/sensitivity/specificity/precision are computed at
+    `decision_threshold` (default 0.5) so the operating point can be moved without retraining.
+    """
     model.eval()
     all_predictions, all_targets = [], []
     total_loss, num_batches = 0.0, 0
@@ -266,22 +294,14 @@ def evaluate_model(model: nn.Module, data_loader, criterion, device, split="val"
             all_targets.extend(targets.cpu().numpy())
     all_predictions = np.array(all_predictions)
     all_targets = np.array(all_targets)
-    n_pos = int((all_targets == 1).sum()) if len(all_targets) else 0
-    if len(all_targets) == 0 or len(np.unique(all_targets)) < 2:
-        # R3: AUC is undefined on a degenerate split (no positives or no negatives).
-        # Return NaN (so it is excluded from ranking/early-stop, not silently counted
-        # as 0.0) plus n_pos for visibility.
-        acc = (100 * accuracy_score(all_targets, (all_predictions > 0.5).astype(int))
-               if len(all_targets) else 0.0)
-        return {"auc": float("nan"), "accuracy": acc,
-                "loss": total_loss / max(num_batches, 1),
-                "total_samples": len(all_targets), "n_pos": n_pos}
-    auc = roc_auc_score(all_targets, all_predictions)
-    predicted_labels = (all_predictions > 0.5).astype(int)
-    accuracy = 100 * accuracy_score(all_targets, predicted_labels)
     avg_loss = total_loss / max(num_batches, 1)
-    return {"auc": auc, "accuracy": accuracy, "loss": avg_loss,
-            "total_samples": len(all_targets), "n_pos": n_pos}
+    thr = float(decision_threshold)
+    # Operating-point metrics at `thr` (acc/sens/spec/precision) + threshold-free AUC.
+    # classification_metrics returns AUC=NaN on a degenerate (single-class) split (R3).
+    from fl_utils import classification_metrics
+    m = classification_metrics(all_targets, all_predictions, threshold=thr)
+    m["loss"] = avg_loss
+    return m
 
 
 def set_seed(seed: int):

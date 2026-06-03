@@ -66,6 +66,7 @@ class GMICDataLoader:
         tolerant_missing_metadata: bool = False,
         file_integrity_check: bool = False,
         fail_on_integrity_error: bool = False,
+        use_balanced_sampler: bool = False,
     ):
         """GMIC data loader with optional preprocessing and integrity verification.
 
@@ -90,6 +91,7 @@ class GMICDataLoader:
         self.cache_validation = cache_validation
         self.train_max_crop_noise = train_max_crop_noise
         self.train_max_crop_size_noise = train_max_crop_size_noise
+        self.use_balanced_sampler = use_balanced_sampler
         self.log_file = log_file
         self.per_file_logging = per_file_logging
         self.tolerant_missing_metadata = tolerant_missing_metadata
@@ -895,12 +897,38 @@ class GMICDataLoader:
     def __len__(self):
         return len(self.train_data)
 
+    def _balanced_index_order(self, samples, rng):
+        """WeightedRandomSampler-equivalent index order (with replacement) for the custom
+        iterator (there is no torch DataLoader to attach a sampler to). Each view-level
+        sample is drawn with prob inversely proportional to its class frequency, so batches
+        see a ~even pos/neg mix. Epoch size (len) is preserved.
+        """
+        labels = np.array([int(s.get("view_level_label", s.get("exam_level_label", 0)))
+                           for s in samples])
+        n = len(labels)
+        if n == 0:
+            return list(range(n))
+        n_pos = int((labels == 1).sum())
+        n_neg = n - n_pos
+        if n_pos == 0 or n_neg == 0:
+            return list(range(n))  # degenerate: nothing to balance
+        w_pos, w_neg = 0.5 / n_pos, 0.5 / n_neg
+        weights = np.where(labels == 1, w_pos, w_neg)
+        weights = weights / weights.sum()
+        order = rng.choice(n, size=n, replace=True, p=weights)
+        return order.tolist()
+
     def get_batch_iterator(self, split: str):
         is_train = split == "train"
         rng = self._rng_train if is_train else self._rng_eval
         samples = self.get_data_for_split(split)
+        # Balanced sampling (train only): resample indices by inverse class frequency.
+        if is_train and getattr(self, "use_balanced_sampler", False):
+            index_order = self._balanced_index_order(samples, rng)
+        else:
+            index_order = range(len(samples))
         batch_images, batch_targets, batch_meta = [], [], []
-        for idx in range(len(samples)):
+        for idx in index_order:
             row = samples[idx]
             path = self._resolve_image_path(row)
             if path is None:
