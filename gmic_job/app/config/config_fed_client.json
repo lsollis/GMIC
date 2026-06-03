@@ -24,7 +24,7 @@
           "val_split": 0.15,
           "test_split": 0.15,
           "random_seed": 42,
-          "output_dir": "/workspace/data/processed",
+          "output_dir": "/workspace/data/processed/centralized",
           "num_processes": 4,
 
           "model_path": "/workspace/models/sample_model_5.p",
@@ -79,7 +79,7 @@
           "eval_threshold_sweep": [0.3, 0.4, 0.5, 0.6, 0.7],
           "freeze_backbone_epochs": 0,
 
-          "log_file": "/workspace/outputs_centralized/executor.log",
+          "log_file": "/workspace/data/processed/centralized/executor.log",
           "file_integrity_check": true,
           "fail_on_integrity_error": false,
 
