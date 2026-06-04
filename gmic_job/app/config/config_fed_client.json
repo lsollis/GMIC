@@ -19,7 +19,7 @@
           "image_path": "/workspace/data/p7_pngs",
           "input_format": "csv",
           "enable_preprocessing": true,
-          "force_preprocessing": false,
+          "force_preprocessing": true,
           "cache_validation": true,
           "use_predefined_splits": true,
           "val_split": 0.15,
@@ -79,7 +79,7 @@
           "decision_threshold": 0.5,
           "eval_threshold_sweep": [0.3, 0.4, 0.5, 0.6, 0.7],
           "freeze_backbone_epochs": 0,
-          "use_augmentation": true,
+          "use_augmentation": false,
           "augmentation": {
             "horizontal_flip": false,
             "max_rotation_deg": 10,
