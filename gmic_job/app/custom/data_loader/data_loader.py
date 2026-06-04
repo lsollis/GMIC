@@ -67,6 +67,8 @@ class GMICDataLoader:
         file_integrity_check: bool = False,
         fail_on_integrity_error: bool = False,
         use_balanced_sampler: bool = False,
+        use_augmentation: bool = False,
+        augmentation: dict | None = None,
     ):
         """GMIC data loader with optional preprocessing and integrity verification.
 
@@ -92,6 +94,16 @@ class GMICDataLoader:
         self.train_max_crop_noise = train_max_crop_noise
         self.train_max_crop_size_noise = train_max_crop_size_noise
         self.use_balanced_sampler = use_balanced_sampler
+        self.use_augmentation = use_augmentation
+        _aug = augmentation or {}
+        self.aug_cfg = {
+            "horizontal_flip": bool(_aug.get("horizontal_flip", False)),
+            "max_rotation_deg": float(_aug.get("max_rotation_deg", 10.0)),
+            "intensity_jitter": float(_aug.get("intensity_jitter", 0.10)),
+        }
+        # Dedicated augmentation RNG, seeded off random_seed for reproducibility (separate from
+        # the crop-noise rng so toggling augmentation doesn't shift the crop-noise stream).
+        self._rng_aug = np.random.RandomState(random_seed)
         self.log_file = log_file
         self.per_file_logging = per_file_logging
         self.tolerant_missing_metadata = tolerant_missing_metadata
@@ -948,6 +960,17 @@ class GMICDataLoader:
                 # R2: a single corrupt/unreadable image must not abort a multi-hour run.
                 self._log(f"[image] skipping unreadable/bad image {path}: {e}", level=logging.WARNING)
                 continue
+            # Conservative augmentation: TRAIN SPLIT ONLY. val/test never reach this branch, so
+            # their tensors are byte-identical to prior runs (deterministic eval preserved).
+            if is_train and self.use_augmentation:
+                aug2d = augmentations.conservative_train_augment(
+                    chw[0], self._rng_aug,
+                    max_rotation_deg=self.aug_cfg["max_rotation_deg"],
+                    intensity_jitter=self.aug_cfg["intensity_jitter"],
+                    horizontal_flip=self.aug_cfg["horizontal_flip"],
+                    view=row["view"],
+                )
+                chw = aug2d[None, ...]
             batch_images.append(chw[None, ...])
             target = row.get("view_level_label", row.get("exam_level_label", 0))
             batch_targets.append(int(target))

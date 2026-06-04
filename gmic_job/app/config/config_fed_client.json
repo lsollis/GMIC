@@ -12,8 +12,8 @@
           "batch_size": 32,
           "lr_heads": 3e-5,
           "lr_backbone": 1e-5,
-          "weight_decay": 1e-2,
-          "optimizer_name": "adamw",
+          "weight_decay": 1e-6,
+          "optimizer_name": "adam",
 
           "data_path": "/workspace/data/gmic_df_combined_centralized_20260601_134413.csv",
           "image_path": "/workspace/data/p7_pngs",
@@ -79,6 +79,12 @@
           "decision_threshold": 0.5,
           "eval_threshold_sweep": [0.3, 0.4, 0.5, 0.6, 0.7],
           "freeze_backbone_epochs": 0,
+          "use_augmentation": true,
+          "augmentation": {
+            "horizontal_flip": false,
+            "max_rotation_deg": 10,
+            "intensity_jitter": 0.10
+          },
 
           "log_file": "/workspace/data/processed/centralized/executor.log",
           "file_integrity_check": true,

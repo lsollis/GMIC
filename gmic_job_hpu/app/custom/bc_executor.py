@@ -175,6 +175,8 @@ class GMICFederatedExecutor(Executor):
             eval_threshold_sweep=None,            # sweep thresholds (default [.3,.4,.5,.6,.7]); on
             freeze_backbone_epochs: int = 0,      # keep backbones frozen for first N epochs
             optimizer_name: str = "adam",         # "adam" (default, unchanged) or "adamw"
+            use_augmentation: bool = False,       # train-only conservative augmentation
+            augmentation: dict | None = None,     # {horizontal_flip,max_rotation_deg,intensity_jitter}
         ):
             """GMIC Federated Executor (feature parity with local trainer)."""
             super().__init__()
@@ -295,6 +297,8 @@ class GMICFederatedExecutor(Executor):
                                          if eval_threshold_sweep else [0.3, 0.4, 0.5, 0.6, 0.7])
             self.freeze_backbone_epochs = int(freeze_backbone_epochs)
             self.optimizer_name = (optimizer_name or "adam").lower()
+            self.use_augmentation = bool(use_augmentation)
+            self.augmentation_cfg = augmentation or {}
             # Guardrail: balanced sampler + a large pos_weight double-counts the imbalance
             # correction (sampler evens the batch mix AND the loss up-weights positives).
             if self.use_balanced_sampler and self.pos_weight > 2.0:
@@ -402,6 +406,8 @@ class GMICFederatedExecutor(Executor):
             file_integrity_check=self.file_integrity_check,
             fail_on_integrity_error=self.fail_on_integrity_error,
             use_balanced_sampler=self.use_balanced_sampler,
+            use_augmentation=self.use_augmentation,
+            augmentation=self.augmentation_cfg,
         )
         self.data_loader.print_summary()
 
@@ -621,7 +627,9 @@ class GMICFederatedExecutor(Executor):
                 f"lr_scheduler={self.lr_scheduler_name} decision_threshold={self.decision_threshold} "
                 f"eval_threshold_sweep={self.eval_threshold_sweep} "
                 f"optimizer={self.optimizer_name} weight_decay={self.weight_decay} "
-                f"freeze_backbone_epochs={self.freeze_backbone_epochs}"
+                f"freeze_backbone_epochs={self.freeze_backbone_epochs} "
+                f"use_augmentation={self.use_augmentation}"
+                + (f" aug={self.data_loader.aug_cfg}" if (self.use_augmentation and getattr(self, 'data_loader', None) is not None) else "")
                 + (f" focal(gamma={self.focal_gamma},alpha={self.focal_alpha})" if self.loss_name == "focal" else "")
             )
 

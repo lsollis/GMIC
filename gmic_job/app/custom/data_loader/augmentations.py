@@ -264,3 +264,39 @@ def random_augmentation_best_center(image, input_size, random_number_generator, 
         return sampled_joint_image[:, :, 0], None
     else:
         return sampled_joint_image[:, :, 0], sampled_joint_image[:, :, 1:]
+
+
+def conservative_train_augment(image, rng, max_rotation_deg=10.0, intensity_jitter=0.10,
+                               horizontal_flip=False, view=""):
+    """Anatomy-safe TRAIN-ONLY augmentation on a normalized 2D image (H,W).
+
+    Applied AFTER standard normalization (zero-mean/unit-std), so:
+      - rotation (+/- max_rotation_deg): cv2.warpAffine with borderMode=BORDER_CONSTANT,
+        borderValue=0.0 -> out-of-frame corners are filled with ZERO (== normalized background
+        mean), NOT reflected. Reflection would inject false breast tissue into the corners;
+        constant-zero is the neutral, anatomically-safe fill.
+      - intensity jitter: additive Gaussian + small multiplicative scale, applied post-normalize
+        so it survives normalization (a pure pre-normalize scale would be cancelled by it).
+      - horizontal_flip: OFF by default. GMIC pre-standardizes breast orientation; a random flip
+        would un-standardize and fight the orientation invariant. Present only for completeness.
+
+    `rng` is a np.random.RandomState (seeded off random_seed) -> reproducible.
+    Geometry preserves orientation (small rotation only; no vertical flip, no shear, no crop).
+    """
+    img = image
+    if horizontal_flip and rng.rand() < 0.5:
+        img = np.fliplr(img)
+
+    if max_rotation_deg and max_rotation_deg > 0:
+        ang = float(rng.uniform(-max_rotation_deg, max_rotation_deg))
+        h, w = img.shape[:2]
+        M = cv2.getRotationMatrix2D((w / 2.0, h / 2.0), ang, 1.0)
+        img = cv2.warpAffine(img, M, (w, h), flags=cv2.INTER_LINEAR,
+                             borderMode=cv2.BORDER_CONSTANT, borderValue=0.0)
+
+    if intensity_jitter and intensity_jitter > 0:
+        scale = 1.0 + float(rng.uniform(-intensity_jitter, intensity_jitter))
+        shift = float(rng.uniform(-intensity_jitter, intensity_jitter))
+        img = img * scale + shift
+
+    return np.ascontiguousarray(img, dtype=np.float32)

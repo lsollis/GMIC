@@ -255,6 +255,37 @@ def test_balanced_sampler_order():
     print(f"[sampler] OK 9:1 pool -> drawn pos_frac={pos_frac:.2f} (len preserved)")
 
 
+def test_augmentation_safety():
+    """Conservative train augmentation: zero-fill rotation (NOT reflection), reproducible,
+    flip-off preserves orientation, and the data-loader gate is train-only."""
+    import numpy as np
+    import inspect
+    sys.path.insert(0, THIS_DIR)
+    import data_loader.augmentations as aug
+    from data_loader.data_loader import GMICDataLoader
+
+    # asymmetric bright 'tissue' on the right so a reflection fill would be detectable
+    img = np.zeros((400, 300), dtype=np.float32)
+    img[100:300, 180:300] = 5.0
+
+    # 1. rotation out-of-frame fill is ZERO, not reflected tissue
+    out = aug.conservative_train_augment(img, np.random.RandomState(0),
+                                         max_rotation_deg=10, intensity_jitter=0.0)
+    assert out[:30, :30].max() < 0.5, "rotation corner not zero-filled (reflection?!)"
+    # 2. reproducible under a fixed seed
+    a = aug.conservative_train_augment(img, np.random.RandomState(42), 10, 0.10)
+    b = aug.conservative_train_augment(img, np.random.RandomState(42), 10, 0.10)
+    assert np.array_equal(a, b), "augmentation not reproducible under fixed seed"
+    # 3. flip OFF keeps tissue on the right (orientation invariant preserved)
+    nf = aug.conservative_train_augment(img, np.random.RandomState(7), 0, 0.0, horizontal_flip=False)
+    assert nf[:, 150:].sum() > nf[:, :150].sum(), "flip-off must keep orientation"
+    # 4. data-loader gate is train-only (exactly one call site, requires is_train)
+    src = inspect.getsource(GMICDataLoader.get_batch_iterator)
+    assert src.count("conservative_train_augment") == 1
+    assert "if is_train and self.use_augmentation:" in src, "augmentation must be gated on is_train"
+    print("[augmentation] OK zero-fill (not reflection), reproducible, flip-off keeps orientation, train-only gate")
+
+
 def test_optimizer_selection():
     """configure_optimizers honors optimizer_name: default/adam -> Adam, adamw -> AdamW.
     Both keep per-group LRs (backbone lr_backbone, heads lr_heads) and apply weight_decay."""
@@ -372,6 +403,7 @@ ALL = [
     test_threshold_metrics,
     test_threshold_sweep,
     test_balanced_sampler_order,
+    test_augmentation_safety,
     test_optimizer_selection,
     test_scheduler_selection,
     test_amp_loss_boundary,
