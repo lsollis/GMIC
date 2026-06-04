@@ -218,7 +218,19 @@ def configure_optimizers(model: nn.Module, args):
     if not param_groups:
         param_groups = [{"params": [p for p in model.parameters() if p.requires_grad], "lr": args.lr_heads}]
 
-    optimizer = optim.Adam(param_groups, weight_decay=getattr(args, "weight_decay", 1e-5))
+    # Optimizer selection (args.optimizer_name): "adam" (default, unchanged) or "adamw".
+    # Both keep the per-group LR structure (backbone lr_backbone / heads lr_heads) and read
+    # weight_decay; betas stay at torch defaults (0.9, 0.999). AdamW decouples weight decay so
+    # it actually regularizes (Adam's L2-WD interacts poorly with adaptive per-param scaling).
+    opt_name = (getattr(args, "optimizer_name", "adam") or "adam").lower()
+    wd = getattr(args, "weight_decay", 1e-5)
+    if opt_name == "adamw":
+        optimizer = optim.AdamW(param_groups, weight_decay=wd)
+    elif opt_name == "adam":
+        optimizer = optim.Adam(param_groups, weight_decay=wd)
+    else:
+        logger.warning("[optim] unknown optimizer '%s'; using Adam", opt_name)
+        optimizer = optim.Adam(param_groups, weight_decay=wd)
 
     # Scheduler selection (args.lr_scheduler):
     #   None / "" / "plateau" -> ReduceLROnPlateau(mode=max on val_auc). None keeps the

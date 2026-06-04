@@ -255,6 +255,31 @@ def test_balanced_sampler_order():
     print(f"[sampler] OK 9:1 pool -> drawn pos_frac={pos_frac:.2f} (len preserved)")
 
 
+def test_optimizer_selection():
+    """configure_optimizers honors optimizer_name: default/adam -> Adam, adamw -> AdamW.
+    Both keep per-group LRs (backbone lr_backbone, heads lr_heads) and apply weight_decay."""
+    import torch.optim as optim
+    from train.training_core import configure_optimizers
+    class OA:
+        lr_heads = 3e-5; lr_backbone = 1e-5; weight_decay = 1e-2; patience = 4
+        lr_scheduler = None; scheduler_patience = 2; min_lr = 0.0; epochs = 40
+    oa = OA()
+    # default (attr absent) -> Adam (byte-compat)
+    o_def, _, _ = configure_optimizers(build_model(), oa)
+    assert type(o_def).__name__ == "Adam"
+    oa.optimizer_name = "adam"
+    o_adam, _, _ = configure_optimizers(build_model(), oa)
+    assert type(o_adam).__name__ == "Adam"
+    oa.optimizer_name = "adamw"
+    o_adamw, _, _ = configure_optimizers(build_model(), oa)
+    assert type(o_adamw).__name__ == "AdamW"
+    lrs = [g["lr"] for g in o_adamw.param_groups]
+    assert 1e-5 in lrs and 3e-5 in lrs, lrs                    # per-group LRs preserved
+    assert all(abs(g["weight_decay"] - 1e-2) < 1e-12 for g in o_adamw.param_groups)
+    assert all(g["betas"] == (0.9, 0.999) for g in o_adamw.param_groups)   # default betas
+    print("[optimizer] OK default/adam->Adam, adamw->AdamW; per-group LRs + wd=0.01 + betas preserved")
+
+
 def test_scheduler_selection():
     """configure_optimizers honors lr_scheduler: None->plateau (back-compat), cosine, none."""
     import torch.optim as optim
@@ -347,6 +372,7 @@ ALL = [
     test_threshold_metrics,
     test_threshold_sweep,
     test_balanced_sampler_order,
+    test_optimizer_selection,
     test_scheduler_selection,
     test_amp_loss_boundary,
     test_earlystopper_reset,

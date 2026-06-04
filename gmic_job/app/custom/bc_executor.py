@@ -174,6 +174,7 @@ class GMICFederatedExecutor(Executor):
             decision_threshold: float = 0.5,      # operating point for acc/sens/spec/precision
             eval_threshold_sweep=None,            # sweep thresholds (default [.3,.4,.5,.6,.7]); on
             freeze_backbone_epochs: int = 0,      # keep backbones frozen for first N epochs
+            optimizer_name: str = "adam",         # "adam" (default, unchanged) or "adamw"
         ):
             """GMIC Federated Executor (feature parity with local trainer)."""
             super().__init__()
@@ -293,6 +294,7 @@ class GMICFederatedExecutor(Executor):
             self.eval_threshold_sweep = (list(eval_threshold_sweep)
                                          if eval_threshold_sweep else [0.3, 0.4, 0.5, 0.6, 0.7])
             self.freeze_backbone_epochs = int(freeze_backbone_epochs)
+            self.optimizer_name = (optimizer_name or "adam").lower()
             # Guardrail: balanced sampler + a large pos_weight double-counts the imbalance
             # correction (sampler evens the batch mix AND the loss up-weights positives).
             if self.use_balanced_sampler and self.pos_weight > 2.0:
@@ -541,6 +543,7 @@ class GMICFederatedExecutor(Executor):
         oa.lr_backbone = self.lr_backbone
         oa.weight_decay = self.weight_decay
         oa.patience = self.patience
+        oa.optimizer_name = self.optimizer_name
         # Scheduler selection (None -> historical ReduceLROnPlateau; preserves current behavior)
         oa.lr_scheduler = self.lr_scheduler_name
         oa.scheduler_patience = self.scheduler_patience
@@ -617,6 +620,7 @@ class GMICFederatedExecutor(Executor):
                 f"lr_heads={self.lr_heads} balanced_sampler={self.use_balanced_sampler} "
                 f"lr_scheduler={self.lr_scheduler_name} decision_threshold={self.decision_threshold} "
                 f"eval_threshold_sweep={self.eval_threshold_sweep} "
+                f"optimizer={self.optimizer_name} weight_decay={self.weight_decay} "
                 f"freeze_backbone_epochs={self.freeze_backbone_epochs}"
                 + (f" focal(gamma={self.focal_gamma},alpha={self.focal_alpha})" if self.loss_name == "focal" else "")
             )
