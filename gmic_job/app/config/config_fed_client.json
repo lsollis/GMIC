@@ -8,10 +8,10 @@
         "path": "bc_executor.GMICFederatedExecutor",
         "args": {
           "epochs": 40,
-          "patience": 4,
+          "patience": 6,
           "batch_size": 32,
           "lr_heads": 3e-5,
-          "lr_backbone": 1e-5,
+          "lr_backbone": 3e-7,
           "weight_decay": 1e-6,
           "optimizer_name": "adam",
 
@@ -78,7 +78,7 @@
           "min_lr": 0.0,
           "decision_threshold": 0.5,
           "eval_threshold_sweep": [0.3, 0.4, 0.5, 0.6, 0.7],
-          "freeze_backbone_epochs": 40,
+          "freeze_backbone_epochs": 2,
           "use_augmentation": false,
           "augmentation": {
             "horizontal_flip": false,
