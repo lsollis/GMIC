@@ -177,6 +177,7 @@ class GMICFederatedExecutor(Executor):
             optimizer_name: str = "adam",         # "adam" (default, unchanged) or "adamw"
             use_augmentation: bool = False,       # train-only conservative augmentation
             augmentation: dict | None = None,     # {horizontal_flip,max_rotation_deg,intensity_jitter}
+            cache_global_trajectory: bool = False,  # persist per-round global w^t for Ditto replay
         ):
             """GMIC Federated Executor (feature parity with local trainer)."""
             super().__init__()
@@ -299,6 +300,7 @@ class GMICFederatedExecutor(Executor):
             self.optimizer_name = (optimizer_name or "adam").lower()
             self.use_augmentation = bool(use_augmentation)
             self.augmentation_cfg = augmentation or {}
+            self.cache_global_trajectory = bool(cache_global_trajectory)
             # Guardrail: balanced sampler + a large pos_weight double-counts the imbalance
             # correction (sampler evens the batch mix AND the loss up-weights positives).
             if self.use_balanced_sampler and self.pos_weight > 2.0:
@@ -668,6 +670,18 @@ class GMICFederatedExecutor(Executor):
             # (textbook FedAvg/FedProx/FedBN; for Ditto, the global-tracked w). Capture them
             # BEFORE loading any best-val checkpoint, so the sent w is never a stale best-state.
             final_state = {k: v.detach().cpu().clone() for k, v in self._underlying.state_dict().items()}
+
+            # Per-round GLOBAL trajectory cache (Ditto consolidation): persist the round's SENT
+            # global w^t (== final_state, the aggregation contribution) under an unambiguous,
+            # distinct-from-deployed name so a single FedAvg run can be REPLAYED to train Ditto/
+            # module-wise personalized models for any lambda without recomputing FedAvg. This is
+            # the start-of-round anchor for round t+1 (anchor convention: round-(t+1) personal
+            # update regularizes toward w^t). Gated on cache_global_trajectory (default off).
+            if getattr(self, "cache_global_trajectory", False):
+                try:
+                    self._save_global_round(fl_ctx, current_round, final_state)
+                except Exception as e:
+                    self.log_warning(fl_ctx, f"[global-cache] save failed for round {current_round}: {e}")
 
             # Deployed/evaluated model = best-val OF THIS ROUND. Load it into the global-tracked
             # model for eval/dumps only (non-Ditto; Ditto deploys v). The SENT w stays = final_state.
@@ -1285,6 +1299,23 @@ class GMICFederatedExecutor(Executor):
             )
             self.log_info(fl_ctx, f"[saliency] wrote {len(sal_maps)} maps -> {sal_out}")
 
+
+    def _save_global_round(self, fl_ctx: FLContext, round_idx, state_dict):
+        """Persist the round's SENT global w^t for the Ditto-consolidation replay cache.
+
+        Distinct from the deployed/best-val artifacts: filename is
+        `{client}_global_round_{t}.pth`, a plain state_dict of the round's final-epoch global
+        (the aggregation contribution). Replaying this trajectory reproduces interleaved Ditto
+        exactly (anchor convention: round-(t+1) personal update anchors to w^t).
+        """
+        persistent_dir = getattr(self, 'results_dir', "/workspace/gmic_results")
+        global_dir = os.path.join(persistent_dir, "global_trajectory")
+        os.makedirs(global_dir, exist_ok=True)
+        client_name = fl_ctx.get_identity_name()
+        out = os.path.join(global_dir, f"{client_name}_global_round_{int(round_idx)}.pth")
+        torch.save(state_dict, out)
+        self.log_info(fl_ctx, f"[global-cache] saved sent global w^{int(round_idx)} -> {out}")
+        return out
 
     def _save_local_model(self, fl_ctx: FLContext, shareable: Shareable, model=None):
         """Save current (deployed) model state"""

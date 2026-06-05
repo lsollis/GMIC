@@ -45,6 +45,9 @@ __all__ = [
     "gmic_malignant_loss",
     "gmic_focal_loss",
     "classification_metrics",
+    "site_selection_metrics",
+    "VALID_SELECTION_METRICS",
+    "replay_personalized",
 ]
 
 # ---- Confirmed prefix -> group mapping (see module docstring) ----------------
@@ -452,4 +455,90 @@ def classification_metrics(targets, probs, threshold: float = 0.5):
         "precision": (tp / (tp + fp)) if (tp + fp) > 0 else float("nan"),
         "threshold": float(threshold),
         "n_pos": n_pos, "total_samples": n,
+    }
+
+
+def replay_personalized(v_model, v_optimizer, anchor_trajectory, loss_fn, proximal_fn,
+                        lam, device, n_rounds, e_personalized, batch_iter_factory,
+                        anchor_is_start_of_round=True):
+    """Personalized-only Ditto replay against a CACHED global trajectory.
+
+    Reproduces interleaved Ditto's personal-model trajectory WITHOUT recomputing FedAvg:
+    for each round t in 0..n_rounds-1, anchor to the cached global w^t (the START-of-round
+    broadcast = previous round's aggregated output, per the verified anchor convention), run
+    e_personalized local epochs of  loss_fn(v(x), y) + proximal_fn(v, anchor, lam), and CARRY
+    v FORWARD (never reset). This is exactly the interleaved personal update with the global
+    pass replaced by a cache read.
+
+    Args:
+      v_model/v_optimizer : the personal model + its optimizer (carried across rounds).
+      anchor_trajectory   : list of state_dicts, anchor_trajectory[t] = the global w to
+                            regularize toward in round t. With anchor_is_start_of_round=True,
+                            this must be [w_init, w^0, w^1, ...] so round t anchors to w^{t-1}
+                            (round 0 -> pretrained init). The caller builds this mapping.
+      loss_fn(outputs, targets) -> scalar ; proximal_fn(model, ref_state, lam) -> scalar.
+      batch_iter_factory()  -> fresh iterator of (inputs, targets, meta) for the train split.
+
+    Returns the per-round list of (val-evaluable) v states is the caller's job; this mutates
+    v_model in place and returns it. Deterministic given seeded data + fixed init.
+    """
+    assert len(anchor_trajectory) >= n_rounds, "anchor trajectory shorter than n_rounds"
+    v_model.train()
+    for t in range(n_rounds):
+        ref = anchor_trajectory[t]   # caller already applied the start-of-round (w^{t-1}) mapping
+        for _ in range(e_personalized):
+            for inputs, targets, _meta in batch_iter_factory():
+                inputs = inputs.to(device)
+                targets = targets.to(device)
+                v_optimizer.zero_grad(set_to_none=True)
+                outputs = v_model(inputs)
+                loss = loss_fn(outputs, targets) + proximal_fn(v_model, ref, lam)
+                loss.backward()
+                v_optimizer.step()
+    return v_model
+
+
+VALID_SELECTION_METRICS = ("worst_site", "mean_site", "pooled")
+
+
+def site_selection_metrics(per_site):
+    """Aggregate per-site validation AUCs into the three candidate selection metrics.
+
+    per_site: dict {site_id: {"auc": float, "n_pos": int, "n": int}} or {site_id: auc}.
+    Returns {"pooled": ..., "mean_site": ..., "worst_site": ..., "per_site": {...}}.
+
+      - worst_site : min over per-site AUCs  -> the equity target (PacificFed thesis); the
+                     underserved site must improve. Noisiest (min of small-n CIs).
+      - mean_site  : unweighted mean of per-site AUCs (conventional; can hide disparity).
+      - pooled     : n-weighted mean of per-site AUCs as a proxy for a single pooled-set AUC
+                     (ignores site structure). NOTE: a true pooled AUC needs the concatenated
+                     scores+labels; when only per-site AUCs are available this is the standard
+                     sample-size-weighted approximation -- pass concatenated arrays to
+                     classification_metrics for the exact pooled AUC.
+
+    ALL THREE are always returned/logged; selection uses ONE pre-committed metric (default
+    worst_site) chosen by the caller. Sites with NaN AUC (degenerate val split) are excluded
+    from the aggregates (and noted in per_site).
+    """
+    import numpy as _np
+    aucs, weights = [], []
+    per = {}
+    for sid, v in per_site.items():
+        if isinstance(v, dict):
+            auc = float(v.get("auc", float("nan")))
+            w = float(v.get("n", v.get("total_samples", 1)) or 1)
+        else:
+            auc, w = float(v), 1.0
+        per[sid] = auc
+        if not _np.isnan(auc):
+            aucs.append(auc); weights.append(w)
+    if not aucs:
+        return {"pooled": float("nan"), "mean_site": float("nan"),
+                "worst_site": float("nan"), "per_site": per}
+    aucs = _np.asarray(aucs); weights = _np.asarray(weights)
+    return {
+        "pooled": float((aucs * weights).sum() / weights.sum()),
+        "mean_site": float(aucs.mean()),
+        "worst_site": float(aucs.min()),
+        "per_site": per,
     }
