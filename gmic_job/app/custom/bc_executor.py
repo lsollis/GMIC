@@ -940,10 +940,25 @@ class GMICFederatedExecutor(Executor):
         hd_lr = float(groups[1]["lr"]) if len(groups) > 1 else bb_lr
         return bb_lr, hd_lr
 
-    def _scheduler_step(self, val_auc):
-        """Step the LR scheduler, tolerating plateau (needs metric) vs cosine/step (no metric)."""
+    def _scheduler_step(self, val_auc, epoch=None):
+        """Step the LR scheduler, tolerating plateau (needs metric) vs cosine/step (no metric).
+
+        Cosine-after-unfreeze: when the backbone is frozen for the first N epochs
+        (freeze_backbone_epochs>0), a CosineAnnealingLR is HELD during those frozen epochs
+        (not stepped), so its decay clock starts at unfreeze and cosine_t_max counts only
+        post-unfreeze epochs. Plateau/None are unaffected (plateau tracks val_auc throughout).
+        """
         sched = getattr(self, "scheduler", None)
         if sched is None:
+            return
+        # Hold a cosine schedule during the frozen warmup (decay starts at unfreeze).
+        if (epoch is not None
+                and self.freeze_backbone_epochs > 0
+                and epoch < self.freeze_backbone_epochs
+                and isinstance(sched, optim.lr_scheduler.CosineAnnealingLR)):
+            self._logger.info(
+                "[scheduler] cosine HELD during frozen epoch %d (decay starts at unfreeze)", epoch + 1
+            )
             return
         try:
             if isinstance(sched, optim.lr_scheduler.ReduceLROnPlateau):
@@ -1088,8 +1103,10 @@ class GMICFederatedExecutor(Executor):
                 val_metrics = self._evaluate_model(fl_ctx, split='val')
                 val_auc = val_metrics['auc']
                 # plateau scheduler steps on val_auc; cosine (and others) step without a metric;
-                # None scheduler -> no-op. Handle all three.
-                self._scheduler_step(val_auc)
+                # None scheduler -> no-op. Handle all three. `epoch` is passed so a cosine
+                # schedule can HOLD during the frozen warmup and only begin decaying at unfreeze
+                # (so cosine_t_max counts post-unfreeze epochs, not frozen ones).
+                self._scheduler_step(val_auc, epoch=epoch)
                 if self.early_stopper.step(val_auc, self.model):
                     round_best_val = val_auc
                 if self.early_stopper.should_stop():
