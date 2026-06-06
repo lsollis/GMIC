@@ -11,7 +11,7 @@
           "patience": 6,
           "batch_size": 32,
           "lr_heads": 3e-5,
-          "lr_backbone": 3e-7,
+          "lr_backbone": 3e-6,
           "weight_decay": 1e-6,
           "optimizer_name": "adam",
 
@@ -45,7 +45,7 @@
           "pretrained_weights_path": "/workspace/models/sample_model_5.p",
 
           "train_log_batch_interval": 1,
-          "log_lr_each_epoch": false,
+          "log_lr_each_epoch": true,
           "tb_log_dir": "/workspace/tb_logs",
           "disable_tensorboard": false,
           "per_file_logging": true,
@@ -73,7 +73,8 @@
           "use_balanced_sampler": true,
           "focal_gamma": 2.0,
           "focal_alpha": 0.25,
-          "lr_scheduler": null,
+          "lr_scheduler": "cosine",
+          "cosine_t_max": 10,
           "scheduler_patience": 2,
           "min_lr": 0.0,
           "decision_threshold": 0.5,
