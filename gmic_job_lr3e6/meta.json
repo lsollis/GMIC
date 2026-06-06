@@ -1,0 +1,8 @@
+{
+    "name": "gmic_job_lr3e6",
+    "min_clients": 1,
+    "mandatory_clients": [],
+    "deploy_map": {
+      "app": ["@ALL"]
+    }
+  }

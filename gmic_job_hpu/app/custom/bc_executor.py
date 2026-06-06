@@ -51,6 +51,21 @@ from fl_utils import (
     gmic_outputs,
 )
 
+def _git_hash():
+    """Short git commit hash of the running code (best-effort; 'unknown' if unavailable).
+
+    Echoed into [run-config] so the log records exactly what code ran (closes the
+    'which commit produced this run' forensic gap)."""
+    try:
+        import subprocess
+        here = os.path.dirname(os.path.abspath(__file__))
+        out = subprocess.run(["git", "-C", here, "rev-parse", "--short", "HEAD"],
+                             capture_output=True, text=True, timeout=5)
+        return out.stdout.strip() or "unknown"
+    except Exception:
+        return "unknown"
+
+
 # Allowed federated methods (selected via the client job config "method" arg).
 VALID_METHODS = ("local", "fedavg", "fedprox", "fedbn", "ditto", "ditto_modulewise")
 
@@ -561,6 +576,11 @@ class GMICFederatedExecutor(Executor):
         self.optimizer, self.scheduler, self.early_stopper = configure_optimizers(self.model, oa)
         # Stash optimizer args so the Ditto personal model `v` can build its own optimizer.
         self._opt_args = oa
+        # Run-start LR sanity: record the effective per-group LRs the optimizer actually got
+        # (heads + backbone are separate groups; a plumbing bug could collapse them to one LR).
+        _bb, _hd = self._effective_group_lrs()
+        self._logger.info("[EXEC] effective LRs at init: heads=%.3e backbone=%.3e (config lr_heads=%s lr_backbone=%s)",
+                          _hd, _bb, self.lr_heads, self.lr_backbone)
 
         # 8. TensorBoard
         self.tb_writer = None
@@ -625,12 +645,14 @@ class GMICFederatedExecutor(Executor):
                 fl_ctx,
                 f"[run-config] method={self.method} use_fedbn={self.use_fedbn} {lam_desc} "
                 f"loss={self.loss_name} pos_weight={self.pos_weight} epochs={self.epochs} "
-                f"lr_heads={self.lr_heads} balanced_sampler={self.use_balanced_sampler} "
+                f"lr_heads={self.lr_heads} lr_backbone={self.lr_backbone} "
+                f"balanced_sampler={self.use_balanced_sampler} "
                 f"lr_scheduler={self.lr_scheduler_name} decision_threshold={self.decision_threshold} "
                 f"eval_threshold_sweep={self.eval_threshold_sweep} "
                 f"optimizer={self.optimizer_name} weight_decay={self.weight_decay} "
                 f"freeze_backbone_epochs={self.freeze_backbone_epochs} "
-                f"use_augmentation={self.use_augmentation}"
+                f"use_augmentation={self.use_augmentation} "
+                f"seed={self.random_seed} git={_git_hash()}"
                 + (f" aug={self.data_loader.aug_cfg}" if (self.use_augmentation and getattr(self, 'data_loader', None) is not None) else "")
                 + (f" focal(gamma={self.focal_gamma},alpha={self.focal_alpha})" if self.loss_name == "focal" else "")
             )
@@ -904,6 +926,20 @@ class GMICFederatedExecutor(Executor):
         self._backbone_frozen = frozen
         self.log_info(fl_ctx, f"[freeze] backbones {'FROZEN' if frozen else 'UNFROZEN'} (heads always trainable)")
 
+    def _effective_group_lrs(self):
+        """Return (backbone_lr, heads_lr) from the live optimizer param groups.
+
+        configure_optimizers appends the backbone group FIRST (lr=lr_backbone) then the head
+        groups (lr=lr_heads), so group 0 = backbone, groups 1+ = heads. Robust to the no-backbone
+        fallback (single group) by reporting that group's lr for both.
+        """
+        groups = self.optimizer.param_groups
+        if not groups:
+            return float("nan"), float("nan")
+        bb_lr = float(groups[0]["lr"])
+        hd_lr = float(groups[1]["lr"]) if len(groups) > 1 else bb_lr
+        return bb_lr, hd_lr
+
     def _scheduler_step(self, val_auc):
         """Step the LR scheduler, tolerating plateau (needs metric) vs cosine/step (no metric)."""
         sched = getattr(self, "scheduler", None)
@@ -1031,9 +1067,17 @@ class GMICFederatedExecutor(Executor):
             ep_acc = 100 * accuracy_score(ep_targets_np, ep_pred_labels) if len(ep_targets_np) else 0.0
             ep_loss_avg = epoch_loss / max(epoch_batches, 1)
 
-            if self.log_lr_each_epoch:
-                lrs = [pg['lr'] for pg in self.optimizer.param_groups]
-                self.log_info(fl_ctx, f"Epoch {epoch + 1} LRs {','.join(f'{lr:.2e}' for lr in lrs)}")
+            # Per-epoch effective per-group LRs (always on): group 0 = backbone, groups 1+ = heads
+            # (per configure_optimizers). Logged explicitly labeled so a plumbing bug giving both
+            # groups the same LR is visible, and so the backbone LR is recorded (not just heads).
+            bb_lr, hd_lr = self._effective_group_lrs()
+            self.log_info(fl_ctx, f"Epoch {epoch + 1} LRs: heads={hd_lr:.3e} backbone={bb_lr:.3e}")
+            # Aggregated epoch summary (greppable trajectory; watch train loss/AUC asymptote).
+            self.log_info(
+                fl_ctx,
+                f"Epoch {epoch + 1} summary train_loss={ep_loss_avg:.4f} train_auc={ep_auc:.4f} "
+                f"train_acc={ep_acc:.2f}%"
+            )
 
             last_epoch_loss = ep_loss_avg
             last_epoch_auc = ep_auc
@@ -1101,11 +1145,14 @@ class GMICFederatedExecutor(Executor):
             "sensitivity": float(core.get("sensitivity", float("nan"))),
             "specificity": float(core.get("specificity", float("nan"))),
             "precision": float(core.get("precision", float("nan"))),
+            "n_pos": int(core.get("n_pos", 0)),
         }
+        # n_pos logged alongside each AUC: with ~200 val positives the AUC CI is wide, and the
+        # positive count is needed for DeLong CIs in the paper.
         self.log_info(
             fl_ctx,
             f"{split.capitalize()} evaluation - AUC {out['auc']:.4f} Acc {out['accuracy']:.2f}% "
-            f"Loss {out['loss']:.4f} | @thr={self.decision_threshold:.2f} "
+            f"Loss {out['loss']:.4f} n={out['samples']} n_pos={out['n_pos']} | @thr={self.decision_threshold:.2f} "
             f"Sens {out['sensitivity']:.4f} Spec {out['specificity']:.4f} Prec {out['precision']:.4f}"
         )
         # Additive operating-point sweep (greppable; denominators logged so small-n noise is
