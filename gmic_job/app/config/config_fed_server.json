@@ -24,7 +24,7 @@
           "args": {
             "parameters": {
               "device_type": "gpu",
-              "gpu_number": "0",
+              "gpu_number": "1",
               "max_crop_noise": [100, 100],
               "max_crop_size_noise": 100,
               "cam_size": [46, 30],

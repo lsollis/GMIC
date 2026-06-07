@@ -15,7 +15,7 @@
           "weight_decay": 1e-6,
           "optimizer_name": "adam",
 
-          "data_path": "/workspace/data/gmic_df_UCHH_full_20260604_113112.csv",
+          "data_path": "/workspace/data/gmic_df_site1.csv",
           "image_path": "/workspace/data/p7_pngs",
           "input_format": "csv",
           "enable_preprocessing": true,
@@ -25,11 +25,11 @@
           "val_split": 0.15,
           "test_split": 0.15,
           "random_seed": 42,
-          "output_dir": "/workspace/data/processed/local_uhcc",
+          "output_dir": "/workspace/data/processed/local_site1",
           "num_processes": 4,
 
           "model_path": "/workspace/models/sample_model_5.p",
-          "device": "cuda:0",
+          "device": "cuda:1",
 
           "percent_t_key": "1",
           "lambda_l1": 1e-5,
@@ -46,7 +46,7 @@
 
           "train_log_batch_interval": 1,
           "log_lr_each_epoch": true,
-          "tb_log_dir": "/workspace/tb_logs_local_uhcc",
+          "tb_log_dir": "/workspace/tb_logs_local_site1",
           "disable_tensorboard": false,
           "per_file_logging": true,
           "tolerant_missing_metadata": false,
@@ -54,7 +54,7 @@
           "use_amp": true,
           "grad_accumulation": 1,
           "memory_efficient": true,
-          "gpus": "0",
+          "gpus": "1",
 
           "gmic_parameters": {
             "max_crop_noise": [100, 100],
@@ -86,7 +86,7 @@
             "intensity_jitter": 0.10
           },
 
-          "log_file": "/workspace/data/processed/local_uhcc/executor.log",
+          "log_file": "/workspace/data/processed/local_site1/executor.log",
           "file_integrity_check": true,
           "fail_on_integrity_error": false,
 
