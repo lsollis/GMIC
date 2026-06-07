@@ -1,6 +1,6 @@
 {
-    "name": "gmic_job",
-    "min_clients": 2,
+    "name": "gmic_job_fedprox_3client",
+    "min_clients": 3,
     "mandatory_clients": [],
     "deploy_map": {
       "app": ["@ALL"]

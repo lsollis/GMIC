@@ -7,15 +7,16 @@
         "id": "GMICFederatedExecutor",
         "path": "bc_executor.GMICFederatedExecutor",
         "args": {
-          "epochs": 3,
-          "patience": 4,
-          "batch_size": 4,
-          "lr_heads": 1e-4,
-          "lr_backbone": 1e-5,
+          "epochs": 40,
+          "patience": 6,
+          "batch_size": 32,
+          "lr_heads": 3e-5,
+          "lr_backbone": 3e-7,
           "weight_decay": 1e-6,
+          "optimizer_name": "adam",
 
-          "data_path": "/workspace/data/gmic_df.csv",
-          "image_path": "/workspace/data/XAI_output",
+          "data_path": "/workspace/data/local_site.csv",
+          "image_path": "/workspace/data/p7_pngs",
           "input_format": "csv",
           "enable_preprocessing": true,
           "force_preprocessing": true,
@@ -24,7 +25,7 @@
           "val_split": 0.15,
           "test_split": 0.15,
           "random_seed": 42,
-          "output_dir": "/workspace/data/processed",
+          "output_dir": "/workspace/data/processed/fedprox_3client",
           "num_processes": 4,
 
           "model_path": "/workspace/models/sample_model_5.p",
@@ -33,7 +34,7 @@
           "percent_t_key": "1",
           "lambda_l1": 1e-5,
 
-          "method": "fedavg",
+          "method": "fedprox",
           "fedprox_mu": 0.01,
           "ditto_lambda": 0.1,
           "lambda_global": 1.0,
@@ -44,8 +45,8 @@
           "pretrained_weights_path": "/workspace/models/sample_model_5.p",
 
           "train_log_batch_interval": 1,
-          "log_lr_each_epoch": false,
-          "tb_log_dir": "/workspace/tb_logs",
+          "log_lr_each_epoch": true,
+          "tb_log_dir": "/workspace/tb_logs_fedprox_3client",
           "disable_tensorboard": false,
           "per_file_logging": true,
           "tolerant_missing_metadata": false,
@@ -67,9 +68,15 @@
           },
 
           "loss": "gmic",
-          "pos_weight": 3.0,
+          "pos_weight": 1.0,
 
-          "log_file": "/workspace/outputs_centralized/executor.log",
+          "use_balanced_sampler": true,
+          "lr_scheduler": null,
+          "decision_threshold": 0.5,
+          "eval_threshold_sweep": [0.3, 0.4, 0.5, 0.6, 0.7],
+          "freeze_backbone_epochs": 2,
+
+          "log_file": "/workspace/data/processed/fedprox_3client/executor.log",
           "file_integrity_check": true,
           "fail_on_integrity_error": false,
 
