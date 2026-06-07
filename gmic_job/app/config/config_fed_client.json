@@ -11,21 +11,21 @@
           "patience": 6,
           "batch_size": 32,
           "lr_heads": 3e-5,
-          "lr_backbone": 3e-6,
+          "lr_backbone": 3e-7,
           "weight_decay": 1e-6,
           "optimizer_name": "adam",
 
-          "data_path": "/workspace/data/gmic_df_combined_centralized_20260604_113256.csv",
+          "data_path": "/workspace/data/gmic_df_UCHH_full_20260604_113112.csv",
           "image_path": "/workspace/data/p7_pngs",
           "input_format": "csv",
           "enable_preprocessing": true,
-          "force_preprocessing": false,
+          "force_preprocessing": true,
           "cache_validation": true,
           "use_predefined_splits": true,
           "val_split": 0.15,
           "test_split": 0.15,
           "random_seed": 42,
-          "output_dir": "/workspace/data/processed/centralized",
+          "output_dir": "/workspace/data/processed/local_uhcc",
           "num_processes": 4,
 
           "model_path": "/workspace/models/sample_model_5.p",
@@ -46,7 +46,7 @@
 
           "train_log_batch_interval": 1,
           "log_lr_each_epoch": true,
-          "tb_log_dir": "/workspace/tb_logs",
+          "tb_log_dir": "/workspace/tb_logs_local_uhcc",
           "disable_tensorboard": false,
           "per_file_logging": true,
           "tolerant_missing_metadata": false,
@@ -73,8 +73,7 @@
           "use_balanced_sampler": true,
           "focal_gamma": 2.0,
           "focal_alpha": 0.25,
-          "lr_scheduler": "cosine",
-          "cosine_t_max": 10,
+          "lr_scheduler": null,
           "scheduler_patience": 2,
           "min_lr": 0.0,
           "decision_threshold": 0.5,
@@ -87,7 +86,7 @@
             "intensity_jitter": 0.10
           },
 
-          "log_file": "/workspace/data/processed/centralized/executor.log",
+          "log_file": "/workspace/data/processed/local_uhcc/executor.log",
           "file_integrity_check": true,
           "fail_on_integrity_error": false,
 
