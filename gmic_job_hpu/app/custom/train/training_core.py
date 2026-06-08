@@ -281,20 +281,25 @@ def apply_freezing_plan(model: nn.Module, args):
 
 def evaluate_model(model: nn.Module, data_loader, criterion, device, split="val",
                    decision_threshold: float = 0.5, eval_threshold_sweep=None):
-    """Evaluate model and return metrics dict.
+    """Evaluate model and return BREAST-LEVEL metrics dict (GMIC's reported unit).
 
-    AUC is threshold-independent. accuracy/sensitivity/specificity/precision are computed at
-    `decision_threshold` (default 0.5) so the operating point can be moved without retraining.
+    Classification metrics (AUC, sensitivity, specificity, precision, accuracy) are computed at
+    the BREAST level: per-image malignant probabilities are aggregated to a breast = (exam_id,
+    laterality), prediction = mean of that breast's views, label = max over its views. This
+    matches the paper ("breast-level predictions = average of the two image-level predictions")
+    and means the logged/selected AUC is the reportable number, not an image-level proxy.
 
-    eval_threshold_sweep: optional list of thresholds (default [.3,.4,.5,.6,.7]). When set,
-    the returned dict carries a "sweep" list of per-threshold {threshold, sensitivity,
-    specificity, precision, n_flagged} computed from the SAME in-memory probs+labels (no extra
-    forward passes). Purely additive context; never affects selection/early-stop/saved-best.
+    Loss stays PER-IMAGE (a training quantity computed per forward sample; reported as mean
+    per-image loss, not breast-averaged). Only the classification metrics move to breast level.
+
+    AUC is threshold-independent. acc/sens/spec/precision at `decision_threshold`. The "sweep"
+    list (default thresholds [.3..,.7]) is also breast-level. n_pos/total_samples in the result
+    are BREAST counts (n_breasts).
     """
     if eval_threshold_sweep is None:
         eval_threshold_sweep = [0.3, 0.4, 0.5, 0.6, 0.7]
     model.eval()
-    all_predictions, all_targets = [], []
+    img_probs, img_targets, img_exam, img_view = [], [], [], []
     total_loss, num_batches = 0.0, 0
     with torch.no_grad():
         for inputs, targets, metadata in data_loader.get_batch_iterator(split):
@@ -305,28 +310,35 @@ def evaluate_model(model: nn.Module, data_loader, criterion, device, split="val"
             # tolerate a bare tensor (legacy). Evaluate the MALIGNANT head (index 1).
             fusion_logits = out[0] if isinstance(out, (tuple, list)) else out
             t = targets.to(dtype=fusion_logits.dtype).view(-1)
-            loss = F.binary_cross_entropy_with_logits(fusion_logits[:, 1], t)
+            loss = F.binary_cross_entropy_with_logits(fusion_logits[:, 1], t)  # per-image loss
             total_loss += loss.item()
             num_batches += 1
             probs = torch.sigmoid(fusion_logits[:, 1]).cpu().numpy()
-            all_predictions.extend(probs)
-            all_targets.extend(targets.cpu().numpy())
-    all_predictions = np.array(all_predictions)
-    all_targets = np.array(all_targets)
-    avg_loss = total_loss / max(num_batches, 1)
+            img_probs.extend(probs)
+            img_targets.extend(targets.cpu().numpy())
+            # metadata carries per-image (exam_id, view) for breast aggregation
+            img_exam.extend(md.get("exam_id") for md in metadata)
+            img_view.extend(md.get("view") for md in metadata)
+    avg_loss = total_loss / max(num_batches, 1)  # per-image mean loss (unchanged unit)
     thr = float(decision_threshold)
-    # Operating-point metrics at `thr` (acc/sens/spec/precision) + threshold-free AUC.
-    # classification_metrics returns AUC=NaN on a degenerate (single-class) split (R3).
-    from fl_utils import classification_metrics
-    m = classification_metrics(all_targets, all_predictions, threshold=thr)
+
+    from fl_utils import classification_metrics, breast_aggregate
+    if img_probs:
+        # Aggregate per-image -> breast level BEFORE any classification metric.
+        breast_probs, breast_labels = breast_aggregate(img_exam, img_view, img_probs, img_targets)
+    else:
+        breast_probs, breast_labels = np.array([]), np.array([])
+
+    m = classification_metrics(breast_labels, breast_probs, threshold=thr)  # breast-level
     m["loss"] = avg_loss
-    # Additive operating-point sweep (same probs+labels; does not touch AUC or selection).
-    n_neg = int((all_targets == 0).sum()) if len(all_targets) else 0
+    m["n_images"] = len(img_probs)  # keep image count for visibility (loss denominator)
+    # total_samples / n_pos in m are now BREAST counts (from classification_metrics).
+    n_neg = int((breast_labels == 0).sum()) if len(breast_labels) else 0
     m["n_neg"] = n_neg
     sweep = []
     for s_thr in eval_threshold_sweep:
-        sm = classification_metrics(all_targets, all_predictions, threshold=s_thr)
-        sm["n_flagged"] = int((all_predictions > float(s_thr)).sum()) if len(all_predictions) else 0
+        sm = classification_metrics(breast_labels, breast_probs, threshold=s_thr)
+        sm["n_flagged"] = int((breast_probs > float(s_thr)).sum()) if len(breast_probs) else 0
         sweep.append({k: sm[k] for k in
                       ("threshold", "sensitivity", "specificity", "precision", "n_flagged")})
     m["sweep"] = sweep

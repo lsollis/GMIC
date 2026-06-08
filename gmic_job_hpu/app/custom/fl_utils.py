@@ -48,6 +48,7 @@ __all__ = [
     "site_selection_metrics",
     "VALID_SELECTION_METRICS",
     "replay_personalized",
+    "breast_aggregate",
 ]
 
 # ---- Confirmed prefix -> group mapping (see module docstring) ----------------
@@ -456,6 +457,38 @@ def classification_metrics(targets, probs, threshold: float = 0.5):
         "threshold": float(threshold),
         "n_pos": n_pos, "total_samples": n,
     }
+
+
+def _parse_laterality(view):
+    """Extract breast laterality (L/R) from a view label. Robust to L-CC / R-MLO / 'LCC' /
+    lowercase. Raises on anything that doesn't begin with L or R (fail loud, never drop)."""
+    s = str(view).strip().upper()
+    if not s or s[0] not in ("L", "R"):
+        raise ValueError(f"cannot parse laterality from view {view!r} (expected L-*/R-*)")
+    return s[0]
+
+
+def breast_aggregate(exam_ids, views, probs, labels):
+    """Aggregate per-IMAGE predictions to BREAST level (GMIC's reported unit).
+
+    A breast = (exam_id, laterality), laterality parsed from the view label. The breast's
+    prediction = MEAN of its views' malignant probabilities; the breast's label = MAX over its
+    views (both views of a breast share a label, so max == any; max is robust to a stray 0).
+    Don't assume exactly 2 views -- average whatever views exist for the breast.
+
+    Returns (breast_probs, breast_labels) as numpy arrays. Every image must map to a breast;
+    an unparseable view raises (no silent drop).
+    """
+    import numpy as _np
+    from collections import OrderedDict
+    groups = OrderedDict()  # (exam_id, lat) -> {"p": [..], "y": [..]}
+    for eid, v, p, y in zip(exam_ids, views, probs, labels):
+        key = (eid, _parse_laterality(v))
+        g = groups.setdefault(key, {"p": [], "y": []})
+        g["p"].append(float(p)); g["y"].append(int(y))
+    bp = _np.array([_np.mean(g["p"]) for g in groups.values()], dtype=float)
+    by = _np.array([int(max(g["y"])) for g in groups.values()], dtype=int)
+    return bp, by
 
 
 def replay_personalized(v_model, v_optimizer, anchor_trajectory, loss_fn, proximal_fn,

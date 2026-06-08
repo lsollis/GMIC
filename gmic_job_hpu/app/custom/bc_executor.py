@@ -1163,13 +1163,16 @@ class GMICFederatedExecutor(Executor):
             "specificity": float(core.get("specificity", float("nan"))),
             "precision": float(core.get("precision", float("nan"))),
             "n_pos": int(core.get("n_pos", 0)),
+            "n_images": int(core.get("n_images", 0)),
         }
-        # n_pos logged alongside each AUC: with ~200 val positives the AUC CI is wide, and the
-        # positive count is needed for DeLong CIs in the paper.
+        # Metrics are BREAST-LEVEL (GMIC's reported unit): n/n_pos are BREAST counts, ~1/2 the
+        # image count. AUC/sens/spec selected/reported on breasts. Loss is per-image (its
+        # denominator is n_images, shown for visibility). n_pos kept for DeLong CIs.
         self.log_info(
             fl_ctx,
-            f"{split.capitalize()} evaluation - AUC {out['auc']:.4f} Acc {out['accuracy']:.2f}% "
-            f"Loss {out['loss']:.4f} n={out['samples']} n_pos={out['n_pos']} | @thr={self.decision_threshold:.2f} "
+            f"{split.capitalize()} evaluation (breast-level) - AUC {out['auc']:.4f} "
+            f"Acc {out['accuracy']:.2f}% Loss {out['loss']:.4f} (per-image, n_images={out['n_images']}) "
+            f"| n_breasts={out['samples']} n_pos={out['n_pos']} @thr={self.decision_threshold:.2f} "
             f"Sens {out['sensitivity']:.4f} Spec {out['specificity']:.4f} Prec {out['precision']:.4f}"
         )
         # Additive operating-point sweep (greppable; denominators logged so small-n noise is
@@ -1179,7 +1182,7 @@ class GMICFederatedExecutor(Executor):
         for sw in core.get("sweep", []):
             self.log_info(
                 fl_ctx,
-                f"[threshold-sweep] split={split} thr={sw['threshold']:.2f} "
+                f"[threshold-sweep] split={split} (breast-level) thr={sw['threshold']:.2f} "
                 f"sens={sw['sensitivity']:.4f} spec={sw['specificity']:.4f} prec={sw['precision']:.4f} "
                 f"n_flagged={sw['n_flagged']} n_pos={n_pos} n_neg={n_neg}"
             )

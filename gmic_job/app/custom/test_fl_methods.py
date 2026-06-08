@@ -286,6 +286,35 @@ def test_augmentation_safety():
     print("[augmentation] OK zero-fill (not reflection), reproducible, flip-off keeps orientation, train-only gate")
 
 
+def test_breast_aggregate():
+    """breast_aggregate: per-image -> breast (exam_id, laterality); pred=mean(views), label=max.
+    Don't assume 2 views; parse laterality robustly; fail loud on unparseable view."""
+    import numpy as np
+    # exam 0: L breast 2 views (CC .8, MLO .6 -> mean .7), R breast 1 view (.2)
+    # exam 1: L breast 2 views (.9,.9 -> .9)
+    exam = [0, 0, 0, 1, 1]
+    view = ["L-CC", "L-MLO", "R-CC", "L-CC", "L-MLO"]
+    probs = [0.8, 0.6, 0.2, 0.9, 0.9]
+    labels = [1, 1, 0, 1, 1]
+    bp, by = F.breast_aggregate(exam, view, probs, labels)
+    assert len(bp) == 3, f"expected 3 breasts, got {len(bp)}"            # (0,L),(0,R),(1,L)
+    assert abs(bp[0] - 0.7) < 1e-9 and by[0] == 1                        # mean(.8,.6)=.7
+    assert abs(bp[1] - 0.2) < 1e-9 and by[1] == 0                        # single-view breast
+    assert abs(bp[2] - 0.9) < 1e-9 and by[2] == 1
+    # label = max over views (robust to a stray disagreeing 0)
+    bp2, by2 = F.breast_aggregate([5, 5], ["R-CC", "R-MLO"], [0.5, 0.5], [0, 1])
+    assert by2[0] == 1
+    # robust laterality parse (lowercase, no dash) + fail-loud on garbage
+    assert F._parse_laterality("l-cc") == "L" and F._parse_laterality("RMLO") == "R"
+    raised = False
+    try:
+        F.breast_aggregate([9], ["XX-CC"], [0.5], [1])
+    except ValueError:
+        raised = True
+    assert raised, "unparseable view must raise (no silent drop)"
+    print(f"[breast] OK 5 images -> 3 breasts, mean-of-views pred, max label, robust parse")
+
+
 def test_optimizer_selection():
     """configure_optimizers honors optimizer_name: default/adam -> Adam, adamw -> AdamW.
     Both keep per-group LRs (backbone lr_backbone, heads lr_heads) and apply weight_decay."""
@@ -404,6 +433,7 @@ ALL = [
     test_threshold_sweep,
     test_balanced_sampler_order,
     test_augmentation_safety,
+    test_breast_aggregate,
     test_optimizer_selection,
     test_scheduler_selection,
     test_amp_loss_boundary,
