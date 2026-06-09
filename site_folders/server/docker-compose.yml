@@ -9,6 +9,10 @@ services:
 
     environment:
       - PYTHONUNBUFFERED=1
+      # Redirect NVFLARE's job log root (log.txt) to a MOUNTED path so it survives the
+      # server's run-dir deletion on job completion. NVFLARE os.makedirs() this automatically
+      # (no manual mkdir needed). Persists under the ${CURRENT_DIR}:/workspace mount.
+      - NVFL_LOG_ROOT=/workspace/server_logs
 
     # ❌ Remove this to avoid name conflicts across servers
     # container_name: gmic_fl_container

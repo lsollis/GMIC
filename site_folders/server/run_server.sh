@@ -60,5 +60,11 @@ if [[ "${1:-}" == "--attach-tmux" ]]; then
 else
   echo "ℹ️  Tip: run './run_server.sh --attach-tmux' only if you kept tmux in compose."
   echo "📌 Showing logs (Ctrl+C to stop):"
-  exec docker logs -f "${CID}"
+  # Option B: tee the live server console stream to a MOUNTED file so it survives a crash
+  # AND the server run-dir deletion. mkdir -p guards the target (the tee would fail if the
+  # parent dir is missing). This is the raw console backup alongside NVFLARE's log.txt
+  # (Option A: NVFL_LOG_ROOT in docker-compose.yml).
+  CONSOLE_LOG_DIR="${SCRIPT_DIR}/server_logs"
+  mkdir -p "${CONSOLE_LOG_DIR}"
+  exec docker logs -f "${CID}" 2>&1 | tee -a "${CONSOLE_LOG_DIR}/server_console.log"
 fi
