@@ -15,7 +15,6 @@
           "weight_decay": 1e-6,
           "optimizer_name": "adam",
 
-          "data_path": "/workspace/data/gmic_df_site2.csv",
           "data_path_map": {
             "UHCC": "/workspace/data/gmic_df_uhcc.csv",
             "HPU": "/workspace/data/gmic_df_hpu.csv",
@@ -31,6 +30,7 @@
           "test_split": 0.15,
           "random_seed": 42,
           "output_dir": "/workspace/data/processed/fedprox_3client_resumed",
+          "preprocess_cache_dir": "/workspace/data/processed/fedprox_3client",
           "num_processes": 4,
 
           "model_path": "/workspace/models/sample_model_5.p",

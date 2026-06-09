@@ -119,6 +119,7 @@ class GMICFederatedExecutor(Executor):
             test_split: float = 0.15,
             random_seed: int = 42,
             output_dir: str = "/workspace/data/processed",
+            preprocess_cache_dir: str | None = None,  # stable crop/cache dir, independent of run output_dir
             results_dir: str = "/workspace/gmic_results_centralized",
             out_dir: str | None = None,
             num_processes: int = 4,
@@ -228,6 +229,9 @@ class GMICFederatedExecutor(Executor):
             self.test_split = test_split
             self.random_seed = random_seed
             self.output_dir = output_dir
+            # Preprocessing crops/cache live here, decoupled from the run output_dir so a new
+            # run (new output_dir) reuses existing crops without copying. Default: output_dir.
+            self.preprocess_cache_dir = preprocess_cache_dir or output_dir
             self.log_file = log_file
             self.file_integrity_check = file_integrity_check
             self.fail_on_integrity_error = fail_on_integrity_error
@@ -375,26 +379,25 @@ class GMICFederatedExecutor(Executor):
 
         # 0. Per-client data path: if a data_path_map is given, each client picks its OWN
         # CSV by FL identity (UHCC/HPU/RSNA-GCP), so all sites keep distinct filenames from
-        # ONE distributed config. Falls back to self.data_path when no map, or identity unmapped.
+        # ONE distributed config. No per-client fallback: a map present but missing this
+        # identity is a config error (raise) rather than silently loading the wrong CSV.
+        # When no map is given at all, self.data_path is used (single-site / centralized jobs).
         if self.data_path_map:
             mapped = self.data_path_map.get(self._identity)
-            if mapped:
-                self._logger.info(
-                    "[EXEC] data_path_map: identity=%s -> %s (overrides default %s)",
-                    self._identity, mapped, self.data_path,
+            if not mapped:
+                raise ValueError(
+                    f"[EXEC] data_path_map is set but client identity {self._identity!r} is not "
+                    f"a key (map keys={list(self.data_path_map.keys())}). Add this client to "
+                    f"data_path_map -- there is no data_path fallback."
                 )
-                self.data_path = mapped
-            else:
-                self._logger.warning(
-                    "[EXEC] data_path_map present but identity=%r not in map keys=%s; "
-                    "using default data_path=%s",
-                    self._identity, list(self.data_path_map.keys()), self.data_path,
-                )
+            self._logger.info("[EXEC] data_path_map: identity=%s -> %s", self._identity, mapped)
+            self.data_path = mapped
 
         # 1. Effective data paths
+        # Preprocessing crops/cache live in preprocess_cache_dir (decoupled from output_dir).
         set_seed(self.random_seed)
-        processed_pkl = os.path.join(self.output_dir, "processed_exam_list.pkl")
-        cropped_dir = os.path.join(self.output_dir, "cropped_images")
+        processed_pkl = os.path.join(self.preprocess_cache_dir, "processed_exam_list.pkl")
+        cropped_dir = os.path.join(self.preprocess_cache_dir, "cropped_images")
         
         # **NEW: Force preprocessing if flag is set**
         # Must clear the FULL preprocessing state so the loader rebuilds from scratch.
@@ -407,9 +410,9 @@ class GMICFederatedExecutor(Executor):
             import shutil
             stale_files = [
                 processed_pkl,
-                os.path.join(self.output_dir, "cropped_exam_list.pkl"),         # Stage-1 list
-                os.path.join(self.output_dir, "preprocessing_cache_info.json"),  # cache validator
-                os.path.join(self.output_dir, "preprocessing_progress.json"),    # resume manifest
+                os.path.join(self.preprocess_cache_dir, "cropped_exam_list.pkl"),         # Stage-1 list
+                os.path.join(self.preprocess_cache_dir, "preprocessing_cache_info.json"),  # cache validator
+                os.path.join(self.preprocess_cache_dir, "preprocessing_progress.json"),    # resume manifest
             ]
             for f in stale_files:
                 if os.path.isfile(f):
@@ -447,7 +450,7 @@ class GMICFederatedExecutor(Executor):
             test_split=self.test_split,
             input_format=effective_input_format,
             enable_preprocessing=effective_enable_preprocessing,
-            output_dir=self.output_dir,
+            output_dir=self.preprocess_cache_dir,  # loader uses this only for crops/cache
             num_processes=self.num_processes,
             cache_validation=self.cache_validation,
             log_file=self.log_file,
