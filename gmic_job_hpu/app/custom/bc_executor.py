@@ -192,7 +192,8 @@ class GMICFederatedExecutor(Executor):
             optimizer_name: str = "adam",         # "adam" (default, unchanged) or "adamw"
             use_augmentation: bool = False,       # train-only conservative augmentation
             augmentation: dict | None = None,     # {horizontal_flip,max_rotation_deg,intensity_jitter}
-            cache_global_trajectory: bool = False,  # persist per-round global w^t for Ditto replay
+            cache_global_trajectory: bool = False,  # persist per-round SENT global w^t for Ditto replay
+            cache_incoming_global: bool = False,  # persist the RECEIVED server aggregate each round (crash recovery)
         ):
             """GMIC Federated Executor (feature parity with local trainer)."""
             super().__init__()
@@ -316,6 +317,7 @@ class GMICFederatedExecutor(Executor):
             self.use_augmentation = bool(use_augmentation)
             self.augmentation_cfg = augmentation or {}
             self.cache_global_trajectory = bool(cache_global_trajectory)
+            self.cache_incoming_global = bool(cache_incoming_global)
             # Guardrail: balanced sampler + a large pos_weight double-counts the imbalance
             # correction (sampler evens the batch mix AND the loss up-weights positives).
             if self.use_balanced_sampler and self.pos_weight > 2.0:
@@ -679,6 +681,19 @@ class GMICFederatedExecutor(Executor):
             # local: skip load | fedbn/use_fedbn: skip BN keys | else: full load.
             # Also captures the frozen global ref (FedProx/Ditto) and lazily inits Ditto v.
             self._consume_global(incoming, fl_ctx)
+
+            # --- crash-recovery: persist the RECEIVED server aggregate for this round ---
+            # `incoming` is the server's aggregated global from the PRIOR round's training
+            # (at round 0 it's the source_ckpt seed). This is byte-for-byte the artifact the
+            # server deletes with its transient run dir, so saving the raw incoming dict here
+            # gives a clean warm-start file from ANY surviving client. Distinct from
+            # cache_global_trajectory (which saves this client's post-training SENT weights).
+            # Saved BEFORE training so a mid-train crash still leaves the round's global on disk.
+            if getattr(self, "cache_incoming_global", False) and incoming is not None:
+                try:
+                    self._save_incoming_global(fl_ctx, current_round, incoming)
+                except Exception as e:
+                    self.log_warning(fl_ctx, f"[recv-global] save failed for round {current_round}: {e}")
 
             # === NUCLEAR OPTION: FORCE RANDOM INIT FOR THIS RUN ===
             # self._reset_model_weights()
@@ -1382,6 +1397,25 @@ class GMICFederatedExecutor(Executor):
         out = os.path.join(global_dir, f"{client_name}_global_round_{int(round_idx)}.pth")
         torch.save(state_dict, out)
         self.log_info(fl_ctx, f"[global-cache] saved sent global w^{int(round_idx)} -> {out}")
+        return out
+
+    def _save_incoming_global(self, fl_ctx: FLContext, round_idx, state_dict):
+        """Persist the RECEIVED server aggregate for crash recovery.
+
+        `state_dict` is the raw `incoming` global (the server's aggregated model from the
+        prior round; at round 0, the source_ckpt seed) — byte-for-byte the artifact the
+        server deletes with its transient run dir. Filename is
+        `{client}_incoming_global_round_{t}.pth`, kept distinct from the SENT-global cache so
+        the two are never confused. To resume a crashed run: point the server persistor's
+        `source_ckpt_file_full_name` at the highest-round file from any surviving client.
+        """
+        persistent_dir = getattr(self, 'results_dir', "/workspace/gmic_results")
+        recv_dir = os.path.join(persistent_dir, "incoming_global")
+        os.makedirs(recv_dir, exist_ok=True)
+        client_name = fl_ctx.get_identity_name()
+        out = os.path.join(recv_dir, f"{client_name}_incoming_global_round_{int(round_idx)}.pth")
+        torch.save(state_dict, out)
+        self.log_info(fl_ctx, f"[recv-global] saved received aggregate (round {int(round_idx)}) -> {out}")
         return out
 
     def _save_local_model(self, fl_ctx: FLContext, shareable: Shareable, model=None):
