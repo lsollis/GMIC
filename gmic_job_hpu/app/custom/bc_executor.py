@@ -106,6 +106,7 @@ class GMICFederatedExecutor(Executor):
             weight_decay: float = 1e-5,
             batch_size: int = 128,
             data_path: str = "/workspace/data/gmic_format_xai.csv",
+            data_path_map: dict | None = None,    # {client_identity: csv_path}; per-client CSV from one config
             image_path: str = "/workspace/data/XAI_output",
             model_path: str = "/workspace/models/sample_model_5.p",
             device: str = "cuda:0" if torch.cuda.is_available() else "cpu",
@@ -213,6 +214,8 @@ class GMICFederatedExecutor(Executor):
             self.weight_decay = weight_decay
             self.batch_size = batch_size
             self.data_path = data_path
+            self.data_path_map = data_path_map or {}
+            self._identity = None  # set in handle_event(START_RUN); used to resolve data_path_map
             self.image_path = image_path
             self.model_path = model_path
             self.device = device
@@ -349,6 +352,12 @@ class GMICFederatedExecutor(Executor):
     def handle_event(self, event_type: str, fl_ctx: FLContext):
         """Handle NVFLARE events"""
         if event_type == EventType.START_RUN:
+            # Capture this client's FL identity (UHCC/HPU/RSNA-GCP) BEFORE initialize(),
+            # which has no fl_ctx, so initialize() can resolve a per-client data_path_map.
+            try:
+                self._identity = fl_ctx.get_identity_name()
+            except Exception:
+                self._identity = None
             self.initialize()
         elif event_type == EventType.END_RUN:
             self._save_final_results(fl_ctx)
@@ -363,6 +372,24 @@ class GMICFederatedExecutor(Executor):
             self._recover_persisted_best_metrics()
         except Exception as e:
             self._logger.warning("[EXEC][WARN] Failed to recover persisted best metrics: %s", e, exc_info=True)
+
+        # 0. Per-client data path: if a data_path_map is given, each client picks its OWN
+        # CSV by FL identity (UHCC/HPU/RSNA-GCP), so all sites keep distinct filenames from
+        # ONE distributed config. Falls back to self.data_path when no map, or identity unmapped.
+        if self.data_path_map:
+            mapped = self.data_path_map.get(self._identity)
+            if mapped:
+                self._logger.info(
+                    "[EXEC] data_path_map: identity=%s -> %s (overrides default %s)",
+                    self._identity, mapped, self.data_path,
+                )
+                self.data_path = mapped
+            else:
+                self._logger.warning(
+                    "[EXEC] data_path_map present but identity=%r not in map keys=%s; "
+                    "using default data_path=%s",
+                    self._identity, list(self.data_path_map.keys()), self.data_path,
+                )
 
         # 1. Effective data paths
         set_seed(self.random_seed)
