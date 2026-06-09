@@ -7,7 +7,7 @@
         "id": "GMICFederatedExecutor",
         "path": "bc_executor.GMICFederatedExecutor",
         "args": {
-          "epochs": 40,
+          "epochs": 1,
           "patience": 6,
           "batch_size": 32,
           "lr_heads": 3e-5,
