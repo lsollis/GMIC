@@ -8,7 +8,7 @@
       "path": "nvflare.app_common.workflows.fedavg.FedAvg",
       "args": {
         "num_clients": 3,
-        "num_rounds": 60,
+        "num_rounds": 29,
         "start_round": 0
       }
     }
@@ -36,7 +36,7 @@
             }
           }
   },
-  "source_ckpt_file_full_name": "/workspace/models/warmstart_round32_global.pth"
+  "source_ckpt_file_full_name": "/workspace/models/sample_model_5.p"
       }
     },
     {

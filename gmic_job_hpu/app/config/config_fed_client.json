@@ -77,6 +77,8 @@
           "freeze_backbone_epochs": 2,
           "cache_global_trajectory": true,
           "cache_incoming_global": true,
+          "resume_from_local_round": 32,
+          "resume_ckpt_dir": "/workspace/data/processed/fedprox_3client",
 
           "log_file": "/workspace/data/processed/fedprox_3client_resumed/executor.log",
           "file_integrity_check": true,

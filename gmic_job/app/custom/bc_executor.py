@@ -194,6 +194,8 @@ class GMICFederatedExecutor(Executor):
             augmentation: dict | None = None,     # {horizontal_flip,max_rotation_deg,intensity_jitter}
             cache_global_trajectory: bool = False,  # persist per-round SENT global w^t for Ditto replay
             cache_incoming_global: bool = False,  # persist the RECEIVED server aggregate each round (crash recovery)
+            resume_from_local_round: int = -1,    # resumed-job round 0: submit cached round-N weights untrained
+            resume_ckpt_dir: str | None = None,   # dir holding {client}_gmic_model_round_{N}.pth (default: results_dir)
         ):
             """GMIC Federated Executor (feature parity with local trainer)."""
             super().__init__()
@@ -318,6 +320,8 @@ class GMICFederatedExecutor(Executor):
             self.augmentation_cfg = augmentation or {}
             self.cache_global_trajectory = bool(cache_global_trajectory)
             self.cache_incoming_global = bool(cache_incoming_global)
+            self.resume_from_local_round = int(resume_from_local_round)
+            self.resume_ckpt_dir = resume_ckpt_dir
             # Guardrail: balanced sampler + a large pos_weight double-counts the imbalance
             # correction (sampler evens the batch mix AND the loss up-weights positives).
             if self.use_balanced_sampler and self.pos_weight > 2.0:
@@ -667,6 +671,19 @@ class GMICFederatedExecutor(Executor):
             elif AppConstants.MODEL_WEIGHTS in shareable:
                 incoming = self._ensure_torch_state(shareable[AppConstants.MODEL_WEIGHTS], fl_ctx)
 
+            # --- RESUME re-seed (round 0 only): submit THIS client's cached round-N weights
+            # UNTRAINED so the server's weighted aggregation reconstructs the round-N global,
+            # then training resumes normally from round 1. Each client uses its OWN local file
+            # -- no gathering/copying, and the per-site weight (train_size) is computed here
+            # from the freshly preprocessed data, matching the original aggregation weight.
+            # The cold global just broadcast at round 0 is intentionally ignored. ---
+            if self.resume_from_local_round >= 0 and current_round == 0:
+                try:
+                    return self._reseed_round(fl_ctx, shareable)
+                except Exception as e:
+                    self.log_exception(fl_ctx, f"[resume] re-seed round failed: {e}")
+                    return make_reply(ReturnCode.EXECUTION_EXCEPTION)
+
             # --- round-0 pretrained baseline (BEFORE consuming the global) ---
             # initialize() pretrained-loads the model, so right now `self.model` holds the
             # cold-start weights. Dump its val/test predictions once so every method is
@@ -862,6 +879,82 @@ class GMICFederatedExecutor(Executor):
         except Exception as e:
             self.log_exception(fl_ctx, f"Error in all-in-one task: {e}")
             return make_reply(ReturnCode.EXECUTION_EXCEPTION)
+
+
+    def _reseed_round(self, fl_ctx: FLContext, shareable: Shareable) -> Shareable:
+        """Resumed-job round 0: submit this client's cached round-N weights UNTRAINED.
+
+        Each client loads its OWN `{client}_gmic_model_round_{N}.pth` and returns those weights
+        as its round-0 contribution, weighted by its train-set size. The server's weighted
+        aggregator then computes Sum(w_i * n_i)/Sum(n_i) -- exactly the round-N global -- and
+        broadcasts it, so round 1 onward trains as normal. No file gathering or server-side
+        file access is needed (clients ship weights over the existing FL channel), and the
+        per-site weight is the freshly-preprocessed train_size (the canonical FedAvg
+        data-volume weight, ~equal to the original round-N aggregation weight at epochs=1).
+        """
+        current_round = int(shareable.get_header(AppConstants.CURRENT_ROUND, 0))
+        client_name = fl_ctx.get_identity_name()
+        round_n = int(self.resume_from_local_round)
+        ckpt_dir = self.resume_ckpt_dir or self.results_dir
+        ckpt = os.path.join(ckpt_dir, f"{client_name}_gmic_model_round_{round_n}.pth")
+        if not os.path.exists(ckpt):
+            raise FileNotFoundError(f"[resume] cached checkpoint not found for {client_name}: {ckpt}")
+
+        sd = torch.load(ckpt, map_location=self.device, weights_only=False)
+        # tolerate a {'model'/'state_dict': sd} wrapper; _save_local_model writes a flat dict
+        if isinstance(sd, dict) and not any(torch.is_tensor(v) for v in sd.values()):
+            for wrap in ("model", "state_dict", "model_dict"):
+                if isinstance(sd.get(wrap), dict):
+                    sd = sd[wrap]
+                    break
+        load_res = self._underlying.load_state_dict(sd, strict=False)
+        self.log_info(
+            fl_ctx,
+            f"[resume] loaded {client_name} round-{round_n} weights <- {ckpt} "
+            f"(missing={len(load_res.missing_keys)} unexpected={len(load_res.unexpected_keys)}); "
+            f"submitting UNTRAINED for server re-aggregation"
+        )
+
+        # The aggregation contribution IS the loaded round-N weights (no training this round).
+        final_state = {k: v.detach().cpu().clone() for k, v in self._underlying.state_dict().items()}
+        updated_weights = {k: v.numpy() for k, v in final_state.items()}
+
+        # Per-site weight = train-set size from the freshly preprocessed data.
+        try:
+            split_info = self.data_loader.get_split_info()
+            num_examples = int(split_info.get("train_size", 0)) or int(self.batch_size)
+        except Exception as e:
+            self.log_warning(fl_ctx, f"[resume] could not read train_size ({e}); falling back to batch_size")
+            num_examples = int(self.batch_size)
+
+        # Quick val pass on the loaded weights so IntimeModelSelector has a metric this round.
+        val_auc = None
+        try:
+            val_core = self._evaluate_model(fl_ctx, split="val", model=self._underlying)
+            auc = val_core.get("auc")
+            if auc is not None and not math.isnan(float(auc)):
+                val_auc = float(auc)
+        except Exception as e:
+            self.log_warning(fl_ctx, f"[resume] val pass failed (non-fatal): {e}")
+
+        model_meta = {MetaKey.NUM_STEPS_CURRENT_ROUND: num_examples, "num_examples": num_examples}
+        metrics = {"round": int(current_round), "resume_seed": 1, "train_samples": int(num_examples)}
+        if val_auc is not None:
+            model_meta["val_auc"] = val_auc
+            metrics["val_auc"] = val_auc
+
+        fl_model_out = FLModel(
+            params=updated_weights, params_type=ParamsType.FULL, metrics=metrics, meta=model_meta
+        )
+        reply = FLModelUtils.to_shareable(fl_model_out)
+        reply.set_return_code(ReturnCode.OK)
+        self.log_info(
+            fl_ctx,
+            f"[resume] round {current_round} re-seed complete: site={client_name} "
+            f"weight(num_examples)={num_examples} val_auc={val_auc}; "
+            f"server will aggregate all clients -> round-{round_n} global"
+        )
+        return reply
 
 
     def _ensure_torch_state(self, params: dict, fl_ctx=None) -> dict:
