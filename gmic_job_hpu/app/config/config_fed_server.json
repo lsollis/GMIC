@@ -36,7 +36,7 @@
             }
           }
   },
-  "source_ckpt_file_full_name": "/workspace/models/sample_model_5.p"
+  "source_ckpt_file_full_name": "/workspace/models/warmstart_round32_global.pth"
       }
     },
     {

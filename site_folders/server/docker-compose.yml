@@ -21,9 +21,15 @@ services:
       - "${CURRENT_DIR}:/workspace"
 
     ports:
-      - "8102:8102"
-      - "8103:8103"
-      - "8443:8443"
+      # The server serves FL (gRPC) on 8002 -- per its own log: "created backbone external
+      # listener for grpc://0:8002" and "secure port at 0.0.0.0:8002". Remote clients connect
+      # to 34.63.18.249:8002, so this host port MUST be published or they get
+      # target_unreachable / "Connection ... is closed". This was missing (only 8102 was
+      # mapped, which nothing listens on), so distributed clients could never reach the server.
+      - "8002:8002"   # FL gRPC (clients <-> server) -- REQUIRED for remote clients
+      - "8102:8102"   # kept (no-op; nothing listens here) to avoid removing an existing mapping
+      - "8103:8103"   # admin / HCI console (server log: "Admin Server ... on Port 8103")
+      - "8443:8443"   # overseer / service-provider
 
     shm_size: "32gb"
     stdin_open: true
