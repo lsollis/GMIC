@@ -15,7 +15,7 @@
           "weight_decay": 1e-6,
           "optimizer_name": "adam",
 
-          "data_path": "/workspace/data/local_site.csv",
+          "data_path": "/workspace/data/gmic_df_site2.csv",
           "image_path": "/workspace/data/p7_pngs",
           "input_format": "csv",
           "enable_preprocessing": true,
