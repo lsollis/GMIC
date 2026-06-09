@@ -19,7 +19,7 @@
           "image_path": "/workspace/data/p7_pngs",
           "input_format": "csv",
           "enable_preprocessing": true,
-          "force_preprocessing": true,
+          "force_preprocessing": false,
           "cache_validation": true,
           "use_predefined_splits": true,
           "val_split": 0.15,
