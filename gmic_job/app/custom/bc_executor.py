@@ -1414,8 +1414,24 @@ class GMICFederatedExecutor(Executor):
         os.makedirs(recv_dir, exist_ok=True)
         client_name = fl_ctx.get_identity_name()
         out = os.path.join(recv_dir, f"{client_name}_incoming_global_round_{int(round_idx)}.pth")
+
+        # Rolling single-file-per-client, round-stamped: write the NEW file first, then prune
+        # older rounds ONLY after the save succeeds. This ordering is crash-safe -- a failure
+        # mid-write leaves the previous round's file intact, so there is always >=1 valid global
+        # on disk. The round number stays in the name so the latest is never mistaken for stale.
         torch.save(state_dict, out)
         self.log_info(fl_ctx, f"[recv-global] saved received aggregate (round {int(round_idx)}) -> {out}")
+
+        prefix = f"{client_name}_incoming_global_round_"
+        kept = os.path.basename(out)
+        for fname in os.listdir(recv_dir):
+            if fname.startswith(prefix) and fname.endswith(".pth") and fname != kept:
+                stale = os.path.join(recv_dir, fname)
+                try:
+                    os.remove(stale)
+                    self.log_info(fl_ctx, f"[recv-global] pruned older global -> {stale}")
+                except OSError as e:
+                    self.log_warning(fl_ctx, f"[recv-global] could not prune {stale}: {e}")
         return out
 
     def _save_local_model(self, fl_ctx: FLContext, shareable: Shareable, model=None):
