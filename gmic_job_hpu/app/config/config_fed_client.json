@@ -16,9 +16,9 @@
           "optimizer_name": "adam",
 
           "data_path_map": {
-            "UHCC": "/workspace/data/gmic_df_uhcc.csv",
-            "HPU": "/workspace/data/gmic_df_hpu.csv",
-            "RSNA-GCP": "/workspace/data/gmic_df_rsna.csv"
+            "UHCC": "/workspace/data/gmic_df_site2.csv",
+            "HPU": "/workspace/data/gmic_df_site2.csv",
+            "RSNA-GCP": "/workspace/data/gmic_df_site2.csv"
           },
           "image_path": "/workspace/data/p7_pngs",
           "input_format": "csv",
