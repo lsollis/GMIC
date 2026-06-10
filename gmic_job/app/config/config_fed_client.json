@@ -32,7 +32,7 @@
 
           "output_dir": "/workspace/sim/ditto/l0.1/{site}",
           "preprocess_cache_dir_map": {
-            "UHCC": "/workspace/data/processed/fedprox_3_client",
+            "UHCC": "/workspace/data/processed/fedprox_3client",
             "HPU": "/workspace/data/processed/ditto_sim_cache/HPU",
             "RSNA-GCP": "/workspace/data/processed/ditto_sim_cache/RSNA-GCP"
           },
