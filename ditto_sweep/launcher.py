@@ -74,13 +74,21 @@ def _git_short(ref_dir):
 
 
 # --------------------------------------------------------------------------- job rendering
-def render_job(lam, rounds, base_job, templates_dir, work_root, output_base, clients):
+def _base_cfg_paths(base_job):
+    return (
+        os.path.join(base_job, "app", "config", "config_fed_client.json"),
+        os.path.join(base_job, "app", "config", "config_fed_server.json"),
+        os.path.join(base_job, "meta.json"),
+    )
+
+
+def render_job(lam, rounds, base_job, work_root, output_base, clients):
     """Materialize a runnable simulator job dir for one lambda.
 
-    Copies base_job/app/custom (the shared model/executor code) and writes the three
-    rendered config files. Per-lambda dynamic fields (ditto_lambda + output/tb/log paths)
-    are set here; {site} is left intact for the executor to substitute per client.
-    Returns the job dir path.
+    Uses base_job's OWN config as the single source (its app/config + meta.json) and copies
+    its app/custom code verbatim. Per-lambda dynamic fields (ditto_lambda + output/tb/log
+    paths + num_rounds) are overridden here; {site} is left intact for the executor to
+    substitute per client. Returns the job dir path.
     """
     ls = _lam_str(lam)
     job_dir = os.path.join(work_root, f"job_l{ls}")
@@ -102,8 +110,10 @@ def render_job(lam, rounds, base_job, templates_dir, work_root, output_base, cli
         with open(os.path.join(dst_custom, "GIT_COMMIT"), "w") as f:
             f.write(gh + "\n")
 
-    # 2) client config: set ditto_lambda + per-lambda output paths ({site} preserved)
-    client_cfg = _load_json(os.path.join(templates_dir, "config_fed_client.json"))
+    base_client, base_server, base_meta = _base_cfg_paths(base_job)
+
+    # 2) client config: base_job's config + per-lambda overrides ({site} preserved)
+    client_cfg = _load_json(base_client)
     args = client_cfg["executors"][0]["executor"]["args"]
     args["method"] = "ditto"
     args["ditto_lambda"] = float(lam)
@@ -113,15 +123,15 @@ def render_job(lam, rounds, base_job, templates_dir, work_root, output_base, cli
     args["log_file"] = f"{run_root}/{{site}}/executor.log"
     _dump_json(os.path.join(cfg_dir, "config_fed_client.json"), client_cfg)
 
-    # 3) server config: set num_rounds + num_clients
-    server_cfg = _load_json(os.path.join(templates_dir, "config_fed_server.json"))
+    # 3) server config: base_job's config + num_rounds / num_clients
+    server_cfg = _load_json(base_server)
     wf_args = server_cfg["workflows"][0]["args"]
     wf_args["num_rounds"] = int(rounds)
     wf_args["num_clients"] = len(clients)
     _dump_json(os.path.join(cfg_dir, "config_fed_server.json"), server_cfg)
 
     # 4) meta.json
-    meta = _load_json(os.path.join(templates_dir, "meta.json"))
+    meta = _load_json(base_meta)
     meta["min_clients"] = len(clients)
     meta["mandatory_clients"] = list(clients)
     _dump_json(os.path.join(job_dir, "meta.json"), meta)
@@ -129,17 +139,16 @@ def render_job(lam, rounds, base_job, templates_dir, work_root, output_base, cli
     return job_dir
 
 
-def cache_paths(templates_dir, clients):
-    """Per-site preprocess cache dirs from the template's preprocess_cache_dir_map."""
-    args = _load_json(os.path.join(templates_dir, "config_fed_client.json"))[
-        "executors"][0]["executor"]["args"]
+def cache_paths(base_job, clients):
+    """Per-site preprocess cache dirs from base_job's preprocess_cache_dir_map."""
+    args = _load_json(_base_cfg_paths(base_job)[0])["executors"][0]["executor"]["args"]
     cmap = args.get("preprocess_cache_dir_map", {})
     return {c: cmap.get(c) for c in clients}
 
 
-def caches_ready(templates_dir, clients):
+def caches_ready(base_job, clients):
     """True iff every site already has a built crop cache (processed_exam_list.pkl)."""
-    for c, d in cache_paths(templates_dir, clients).items():
+    for c, d in cache_paths(base_job, clients).items():
         if not d or not os.path.isfile(os.path.join(d, "processed_exam_list.pkl")):
             return False
     return True
@@ -242,8 +251,10 @@ def print_report(results, clients, metric):
 # --------------------------------------------------------------------------- main
 def main():
     ap = argparse.ArgumentParser(description="Ditto lambda sweep via NVFLARE simulator.")
-    ap.add_argument("--base-job", required=True, help="job dir providing app/custom (e.g. ../gmic_job)")
-    ap.add_argument("--templates-dir", default=os.path.join(os.path.dirname(__file__), "templates"))
+    ap.add_argument("--base-job", required=True,
+                    help="ditto job dir providing app/config + app/custom (e.g. ../gmic_job). "
+                         "Its config is the single source; the launcher overrides only "
+                         "ditto_lambda, num_rounds, and the output/tb/log paths per lambda.")
     ap.add_argument("--lambdas", default="0.01,0.05,0.1,0.5,1.0,2.0")
     ap.add_argument("--rounds", type=int, default=20)
     ap.add_argument("--gpu-pools", default="1,2,3;4,5,6",
@@ -272,11 +283,10 @@ def main():
     print(f"[sweep] gpu_pools={pools} (=> {len(pools)} concurrent runs)  metric={a.metric}")
     print(f"[sweep] output_base={a.output_base}  work_root={a.work_root}")
 
-    # Pre-render all jobs (cheap; also validates templates early)
+    # Pre-render all jobs (cheap; also validates base_job config early)
     jobs = {}
     for lam in lambdas:
-        jobs[lam] = render_job(lam, a.rounds, a.base_job, a.templates_dir,
-                               a.work_root, a.output_base, clients)
+        jobs[lam] = render_job(lam, a.rounds, a.base_job, a.work_root, a.output_base, clients)
         print(f"[render] lambda={_lam_str(lam)} -> {jobs[lam]}")
 
     if a.dry_run:
@@ -286,38 +296,40 @@ def main():
             print("  would run:", " ".join(simulator_cmd(jobs[lam], ws, clients, pools[0], a.threads)))
         return
 
-    # --prepare-cache: the ONLY mode that writes preprocessing data. Build the per-site crop
-    # caches once via a 1-round solo run, then exit. Kept separate from the sweep on purpose
-    # -- a hyperparameter sweep must not touch the training data.
+    # --prepare-cache: build the per-site crop caches once via a 1-round solo run, then exit.
     if a.prepare_cache:
         print(f"[prepare-cache] building per-site crop caches via a 1-round solo run "
               f"(lambda={_lam_str(lambdas[0])}, gpus={pools[0]})")
-        cache_job = render_job(lambdas[0], 1, a.base_job, a.templates_dir,
+        cache_job = render_job(lambdas[0], 1, a.base_job,
                                a.work_root, a.output_base + "_cacheprep", clients)
         ws = os.path.join(a.work_root, "ws_cacheprep")
         proc, lf = launch(cache_job, ws, clients, pools[0], a.threads,
                           os.path.join(a.work_root, "cacheprep.log"))
         rc = proc.wait()
         lf.close()
-        ok = caches_ready(a.templates_dir, clients)
+        ok = caches_ready(a.base_job, clients)
         print(f"[prepare-cache] done rc={rc}; caches_ready={ok}")
         if not ok:
             print("[prepare-cache] WARNING: caches still not detected; check cacheprep.log.")
         return
 
-    # Sweep is READ-ONLY w.r.t. training data: it requires the per-site caches to already
-    # exist and never builds/modifies them. Fail fast (rather than silently re-cropping) so
-    # a missing cache can't turn the sweep into a data-writing job.
-    if not caches_ready(a.templates_dir, clients):
-        missing = {c: d for c, d in cache_paths(a.templates_dir, clients).items()
-                   if not (d and os.path.isfile(os.path.join(d, "processed_exam_list.pkl")))}
-        print("[error] crop caches are not built for: " + ", ".join(missing.keys()))
-        print("        the sweep is read-only and will NOT preprocess. Build caches once:")
-        print("          python launcher.py --base-job %s --prepare-cache [other args]" % a.base_job)
-        print("        (or point preprocess_cache_dir_map in templates/config_fed_client.json "
-              "at existing crops).")
-        sys.exit(2)
-    print("[run] caches present -> sweep is read-only on training data.")
+    # Build the shared per-site crop caches ONCE (1-round solo run) before any parallel runs,
+    # if they're missing -- preprocessing the (train/val/test SPLITS of the) data is fine; what
+    # the sweep must never do is use TEST data for selection (it doesn't: lambda is ranked by
+    # VAL AUC, see collect_lambda_metrics / the server IntimeModelSelector). Solo-first avoids
+    # two cold parallel runs racing on the same cache. Skipped when caches already exist.
+    if not caches_ready(a.base_job, clients):
+        print(f"[cache] per-site caches missing -> building once (1-round solo run, gpus={pools[0]})")
+        warm_job = render_job(lambdas[0], 1, a.base_job,
+                              a.work_root, a.output_base + "_cacheprep", clients)
+        ws = os.path.join(a.work_root, "ws_cacheprep")
+        proc, lf = launch(warm_job, ws, clients, pools[0], a.threads,
+                          os.path.join(a.work_root, "cacheprep.log"))
+        rc = proc.wait()
+        lf.close()
+        print(f"[cache] build done rc={rc}; caches_ready={caches_ready(a.base_job, clients)}")
+    else:
+        print("[cache] per-site caches present -> reusing (no preprocessing).")
 
     # Schedule the sweep across GPU pools (one running job per pool).
     pending = list(lambdas)

@@ -4,11 +4,11 @@
   "task_result_filters": [],
   "workflows": [
     {
-      "id": "fedavg_all_in_one",
+      "id": "ditto_fedavg",
       "path": "nvflare.app_common.workflows.fedavg.FedAvg",
       "args": {
-        "num_clients": 1,
-        "num_rounds": 1,
+        "num_clients": 3,
+        "num_rounds": 20,
         "start_round": 0,
         "persistor_id": "persistor"
       }
@@ -24,7 +24,7 @@
           "args": {
             "parameters": {
               "device_type": "gpu",
-              "gpu_number": "2",
+              "gpu_number": "0",
               "max_crop_noise": [100, 100],
               "max_crop_size_noise": 100,
               "cam_size": [46, 30],
@@ -36,8 +36,8 @@
               "percent_t": 0.02
             }
           }
-  },
-  "source_ckpt_file_full_name": "/workspace/models/sample_model_5.p"
+        },
+        "source_ckpt_file_full_name": "/workspace/models/sample_model_5.p"
       }
     },
     {

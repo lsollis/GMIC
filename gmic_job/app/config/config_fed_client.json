@@ -7,7 +7,7 @@
         "id": "GMICFederatedExecutor",
         "path": "bc_executor.GMICFederatedExecutor",
         "args": {
-          "epochs": 40,
+          "epochs": 1,
           "patience": 6,
           "batch_size": 32,
           "lr_heads": 3e-5,
@@ -15,38 +15,48 @@
           "weight_decay": 1e-6,
           "optimizer_name": "adam",
 
-          "data_path": "/workspace/data/gmic_df_site2.csv",
-          "image_path": "/workspace/data/p7_pngs",
+          "data_path_map": {
+            "UHCC": "/workspace/data/gmic_df_UHCC_full_20260604_113112.csv",
+            "HPU": "/workspace/data/gmic_df_site2.csv",
+            "RSNA-GCP": "/workspace/data/gmic_df_site1.csv"
+          },
+          "image_path": "/workspace/data",
           "input_format": "csv",
           "enable_preprocessing": true,
-          "force_preprocessing": true,
+          "force_preprocessing": false,
           "cache_validation": true,
           "use_predefined_splits": true,
           "val_split": 0.15,
           "test_split": 0.15,
           "random_seed": 42,
-          "output_dir": "/workspace/data/processed/local_site2",
+
+          "output_dir": "/workspace/sim/ditto/l0.1/{site}",
+          "preprocess_cache_dir_map": {
+            "UHCC": "/workspace/data/processed/ditto_sim_cache/UHCC",
+            "HPU": "/workspace/data/processed/ditto_sim_cache/HPU",
+            "RSNA-GCP": "/workspace/data/processed/ditto_sim_cache/RSNA-GCP"
+          },
           "num_processes": 4,
 
           "model_path": "/workspace/models/sample_model_5.p",
-          "device": "cuda:2",
+          "pretrained_weights_path": "/workspace/models/sample_model_5.p",
+          "device": "cuda:0",
 
           "percent_t_key": "1",
           "lambda_l1": 1e-5,
 
-          "method": "local",
-          "fedprox_mu": 0.01,
+          "method": "ditto",
           "ditto_lambda": 0.1,
+          "fedprox_mu": 0.01,
           "lambda_global": 1.0,
           "lambda_local": 0.1,
           "lambda_fusion": null,
           "use_fedbn": false,
           "local_epochs": null,
-          "pretrained_weights_path": "/workspace/models/sample_model_5.p",
 
           "train_log_batch_interval": 1,
           "log_lr_each_epoch": true,
-          "tb_log_dir": "/workspace/tb_logs_local_site2",
+          "tb_log_dir": "/workspace/sim/ditto/l0.1/tb/{site}",
           "disable_tensorboard": false,
           "per_file_logging": true,
           "tolerant_missing_metadata": false,
@@ -54,7 +64,7 @@
           "use_amp": true,
           "grad_accumulation": 1,
           "memory_efficient": true,
-          "gpus": "2",
+          "gpus": "0",
 
           "gmic_parameters": {
             "max_crop_noise": [100, 100],
@@ -71,22 +81,15 @@
           "pos_weight": 1.0,
 
           "use_balanced_sampler": true,
-          "focal_gamma": 2.0,
-          "focal_alpha": 0.25,
           "lr_scheduler": null,
-          "scheduler_patience": 2,
-          "min_lr": 0.0,
           "decision_threshold": 0.5,
           "eval_threshold_sweep": [0.3, 0.4, 0.5, 0.6, 0.7],
           "freeze_backbone_epochs": 2,
-          "use_augmentation": false,
-          "augmentation": {
-            "horizontal_flip": false,
-            "max_rotation_deg": 10,
-            "intensity_jitter": 0.10
-          },
+          "resume_from_local_round": -1,
+          "cache_global_trajectory": false,
+          "cache_incoming_global": false,
 
-          "log_file": "/workspace/data/processed/local_site2/executor.log",
+          "log_file": "/workspace/sim/ditto/l0.1/{site}/executor.log",
           "file_integrity_check": true,
           "fail_on_integrity_error": false,
 
