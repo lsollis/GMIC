@@ -219,6 +219,7 @@ class GMICFederatedExecutor(Executor):
             cache_incoming_global: bool = False,  # per round: save RECEIVED aggregate (all rounds) + eval val/test + dump preds
             resume_from_local_round: int = -1,    # resumed-job round 0: submit cached round-N weights untrained
             resume_ckpt_dir: str | None = None,   # dir holding {client}_gmic_model_round_{N}.pth (default: results_dir)
+            salvage_eval_rounds: list | None = None,  # test-only salvage: reconstruct+eval these rounds' globals (no training)
         ):
             """GMIC Federated Executor (feature parity with local trainer)."""
             super().__init__()
@@ -355,6 +356,7 @@ class GMICFederatedExecutor(Executor):
             self.cache_incoming_global = bool(cache_incoming_global)
             self.resume_from_local_round = int(resume_from_local_round)
             self.resume_ckpt_dir = resume_ckpt_dir
+            self.salvage_eval_rounds = [int(r) for r in salvage_eval_rounds] if salvage_eval_rounds else []
             # Guardrail: balanced sampler + a large pos_weight double-counts the imbalance
             # correction (sampler evens the batch mix AND the loss up-weights positives).
             if self.use_balanced_sampler and self.pos_weight > 2.0:
@@ -767,6 +769,16 @@ class GMICFederatedExecutor(Executor):
             elif AppConstants.MODEL_WEIGHTS in shareable:
                 incoming = self._ensure_torch_state(shareable[AppConstants.MODEL_WEIGHTS], fl_ctx)
 
+            # --- SALVAGE eval (test-only, no training): reconstruct each configured round's global
+            # via the server's weighted aggregation of resubmitted SENT weights, evaluate it +
+            # this site's own sent model on val+test, and dump preds. Short-circuits the round. ---
+            if self.salvage_eval_rounds:
+                try:
+                    return self._salvage_round(fl_ctx, shareable, incoming)
+                except Exception as e:
+                    self.log_exception(fl_ctx, f"[salvage] round failed: {e}")
+                    return make_reply(ReturnCode.EXECUTION_EXCEPTION)
+
             # --- RESUME re-seed (round 0 only): submit THIS client's cached round-N weights
             # UNTRAINED so the server's weighted aggregation reconstructs the round-N global,
             # then training resumes normally from round 1. Each client uses its OWN local file
@@ -984,6 +996,108 @@ class GMICFederatedExecutor(Executor):
             self.log_exception(fl_ctx, f"Error in all-in-one task: {e}")
             return make_reply(ReturnCode.EXECUTION_EXCEPTION)
 
+
+    def _salvage_ckpt_path(self, fl_ctx: FLContext, round_n) -> str | None:
+        """Path to this client's SENT weights for a round: prefer the authoritative
+        global_trajectory file, fall back to the deployed local checkpoint (equal at epochs=1)."""
+        client = fl_ctx.get_identity_name()
+        base = self.resume_ckpt_dir or self.results_dir
+        for c in (os.path.join(base, "global_trajectory", f"{client}_global_round_{int(round_n)}.pth"),
+                  os.path.join(base, f"{client}_gmic_model_round_{int(round_n)}.pth")):
+            if os.path.exists(c):
+                return c
+        return None
+
+    def _salvage_round(self, fl_ctx: FLContext, shareable: Shareable, incoming) -> Shareable:
+        """Test-only salvage of an interrupted run: reconstruct + evaluate per-round globals.
+
+        Drives a plain FedAvg job with NO training over salvage_eval_rounds = [N0, N1, ...]. At FL
+        round r the client:
+          - r>=1: the broadcast `incoming` is the server's train-size-weighted aggregate of round
+            (r-1)'s resubmitted SENT weights == the reconstructed global built from contributions of
+            source round salvage_eval_rounds[r-1]. Evaluate it on val+test and dump preds
+            (method=incoming_global, round=that source round) -> the shared-global endpoint
+            (per-site + pooled computed offline by tools/salvage_stats.py).
+          - r<K: load this client's OWN sent weights for N=salvage_eval_rounds[r], evaluate on
+            val+test and dump preds (method=deployed_local, round=N) -> the as-deployed per-site
+            endpoint; submit those weights weighted by train_size so the server reconstructs round
+            N's global for evaluation next round.
+          - r==K (trailing round): unit-weight dummy submission; only the eval of the last
+            reconstruction matters.
+
+        Weighting (requirement 1) is the freshly-preprocessed train_size, matching the original
+        FedAvg aggregation weight at epochs=1. deployed_local at round N == the sent weights ==
+        (epochs=1) the best-val deployed model, so its val AUC reproduces the original logged
+        deployed_val_auc[N] -- a built-in end-to-end pipeline check. Server config: a normal FedAvg
+        controller with num_rounds = len(salvage_eval_rounds) + 1.
+        """
+        current_round = int(shareable.get_header(AppConstants.CURRENT_ROUND, 0))
+        client = fl_ctx.get_identity_name()
+        rounds = self.salvage_eval_rounds
+        K = len(rounds)
+
+        def _eval_and_dump(model, src_round, method_tag):
+            for split in ("val", "test"):
+                if not self.data_loader.get_data_for_split(split):
+                    continue
+                core = self._evaluate_model(fl_ctx, split=split, model=model)
+                self.log_info(
+                    fl_ctx,
+                    f"[salvage] site={client} {method_tag} round={int(src_round)} "
+                    f"{split}_auc={core['auc']:.4f} n={core['samples']}"
+                )
+                try:
+                    self._dump_predictions(fl_ctx, split=split, model=model,
+                                           round_idx=int(src_round), method_tag=method_tag,
+                                           save_saliency=False)
+                except Exception as e:
+                    self.log_warning(fl_ctx, f"[salvage] {method_tag} preds ({split}) failed: {e}")
+
+        # (1) Evaluate the reconstructed global broadcast this round (aggregate of last submission).
+        if current_round >= 1 and incoming is not None:
+            src = int(rounds[current_round - 1])
+            self._underlying.load_state_dict(self._ensure_torch_state(incoming, fl_ctx), strict=False)
+            self.log_info(fl_ctx, f"[salvage] evaluating reconstructed global (from round-{src} contributions)")
+            _eval_and_dump(self.model, src, "incoming_global")
+
+        # Per-site weight = train-set size from the freshly preprocessed (cached) data.
+        try:
+            num_examples = int(self.data_loader.get_split_info().get("train_size", 0)) or int(self.batch_size)
+        except Exception as e:
+            self.log_warning(fl_ctx, f"[salvage] could not read train_size ({e}); using batch_size")
+            num_examples = int(self.batch_size)
+
+        # (2) If rounds remain, load + eval + submit this client's own SENT weights for that round.
+        if current_round < K:
+            n = int(rounds[current_round])
+            path = self._salvage_ckpt_path(fl_ctx, n)
+            if path is None:
+                raise FileNotFoundError(f"[salvage] no sent/local checkpoint for {client} round {n}")
+            sd = torch.load(path, map_location=self.device, weights_only=False)
+            if isinstance(sd, dict) and not any(torch.is_tensor(v) for v in sd.values()):
+                for wrap in ("model", "state_dict", "model_dict"):
+                    if isinstance(sd.get(wrap), dict):
+                        sd = sd[wrap]
+                        break
+            self._underlying.load_state_dict(sd, strict=False)
+            self.log_info(fl_ctx, f"[salvage] loaded own round-{n} sent weights <- {path}")
+            _eval_and_dump(self._underlying, n, "deployed_local")
+            weight = num_examples
+            self.log_info(fl_ctx, f"[salvage] submitting round-{n} weights weight(train_size)={weight}")
+        else:
+            weight = 1
+            self.log_info(fl_ctx, "[salvage] trailing round: unit-weight dummy submission (aggregate unused)")
+
+        final_state = {k: v.detach().cpu().clone() for k, v in self._underlying.state_dict().items()}
+        updated_weights = {k: v.numpy() for k, v in final_state.items()}
+        model_meta = {MetaKey.NUM_STEPS_CURRENT_ROUND: weight, "num_examples": weight}
+        metrics = {"round": int(current_round), "salvage": 1, "train_samples": int(weight)}
+        fl_model_out = FLModel(
+            params=updated_weights, params_type=ParamsType.FULL, metrics=metrics, meta=model_meta
+        )
+        reply = FLModelUtils.to_shareable(fl_model_out)
+        reply.set_return_code(ReturnCode.OK)
+        return reply
 
     def _reseed_round(self, fl_ctx: FLContext, shareable: Shareable) -> Shareable:
         """Resumed-job round 0: submit this client's cached round-N weights UNTRAINED.

@@ -215,11 +215,13 @@ def analyze_endpoint(val_df, test_df, label):
                                    test_df["prob_malignant"], test_df["label"])
     thr = youden_threshold(vy, vp)
     auc, lo, hi, n_pos, n_neg = delong_auc_ci(ty_, tp_)
+    val_auc, _, _, _, _ = delong_auc_ci(vy, vp)   # for pooled-best ROUND selection (select on val)
     op = sens_spec_at(ty_, tp_, thr)
     return {
         "endpoint": label,
         "n_breasts": int(n_pos + n_neg),
         "n_pos": int(n_pos),
+        "val_auc": val_auc,
         "test_auc": auc, "auc_lo": lo, "auc_hi": hi,
         "youden_thr": thr,
         "sensitivity": op["sensitivity"], "sens_lo": op["sens_lo"], "sens_hi": op["sens_hi"],
@@ -228,13 +230,18 @@ def analyze_endpoint(val_df, test_df, label):
     }
 
 
-def analyze_group(df_group):
-    """All endpoints (each site + pooled) for one (method, round) group."""
+def analyze_group(df_group, allow_pooled=True):
+    """All endpoints (each site, and pooled when valid) for one (method, round) group.
+
+    allow_pooled MUST be False when each site evaluated a DIFFERENT model (method=deployed_local):
+    pooling predictions across three different models is meaningless. It is True for a single shared
+    model broadcast to all sites (incoming_global, pretrained_baseline)."""
     val = df_group[df_group["split"] == "val"]
     test = df_group[df_group["split"] == "test"]
     rows = []
     if len(val) and len(test):
-        rows.append(analyze_endpoint(val, test, "POOLED"))
+        if allow_pooled:
+            rows.append(analyze_endpoint(val, test, "POOLED"))
         for site in sorted(set(test["site_id"]) & set(val["site_id"])):
             rows.append(analyze_endpoint(val[val["site_id"] == site],
                                          test[test["site_id"] == site], site))
@@ -271,7 +278,8 @@ def load_predictions(pred_dir):
 
 def _fmt(row):
     return (f"{row['endpoint']:<10} n={row['n_breasts']:>4} (pos={row['n_pos']:>3})  "
-            f"AUC={row['test_auc']:.4f} [{row['auc_lo']:.4f}-{row['auc_hi']:.4f}]  "
+            f"valAUC={row['val_auc']:.4f}  "
+            f"testAUC={row['test_auc']:.4f} [{row['auc_lo']:.4f}-{row['auc_hi']:.4f}]  "
             f"thr={row['youden_thr']:.3f}  "
             f"Sens={row['sensitivity']:.3f} [{row['sens_lo']:.3f}-{row['sens_hi']:.3f}]  "
             f"Spec={row['specificity']:.3f} [{row['spec_lo']:.3f}-{row['spec_hi']:.3f}]")
@@ -280,9 +288,12 @@ def _fmt(row):
 def run(pred_dir, out_prefix=None):
     df = load_predictions(pred_dir)
     all_rows = []
+    # Pooling is only valid when every site evaluated the SAME model. deployed_local is per-site
+    # (a different model per site), so its pooled endpoint would be meaningless -> per-site only.
+    pooled_invalid_methods = {"deployed_local"}
     for (method, rnd), g in df.groupby(["method", "round"]):
         print(f"\n=== method={method} round={rnd} ===")
-        for row in analyze_group(g):
+        for row in analyze_group(g, allow_pooled=method not in pooled_invalid_methods):
             row["method"] = method
             row["round"] = int(rnd)
             all_rows.append(row)
