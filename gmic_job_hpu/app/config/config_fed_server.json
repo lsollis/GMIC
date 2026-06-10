@@ -8,7 +8,7 @@
       "path": "nvflare.app_common.workflows.fedavg.FedAvg",
       "args": {
         "num_clients": 3,
-        "num_rounds": 8,
+        "num_rounds": 7,
         "start_round": 0
       }
     }
@@ -41,15 +41,14 @@
     },
     {
       "id": "shareable_generator",
-      "path": "salvage_shareable_generator.SalvageShareableGenerator",
+      "path": "nvflare.app_common.shareablegenerators.full_model_shareable_generator.FullModelShareableGenerator",
       "args": {}
     },
     {
       "id": "aggregator",
-      "path": "salvage_pooled_aggregator.SalvagePooledAggregator",
+      "path": "nvflare.app_common.aggregators.intime_accumulate_model_aggregator.InTimeAccumulateWeightedAggregator",
       "args": {
-        "expected_data_kind": "WEIGHTS",
-        "stats_out_dir": "/workspace/server_logs"
+        "expected_data_kind": "WEIGHTS"
       }
     },
     {
