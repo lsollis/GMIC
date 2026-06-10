@@ -24,7 +24,7 @@
           "input_format": "csv",
           "enable_preprocessing": true,
           "force_preprocessing": false,
-          "cache_validation": true,
+          "cache_validation": false,
           "use_predefined_splits": true,
           "val_split": 0.15,
           "test_split": 0.15,
