@@ -1010,6 +1010,19 @@ class GMICFederatedExecutor(Executor):
                 return c
         return None
 
+    def _write_salvage_json(self, fl_ctx: FLContext, site, method_tag, round_n, metrics):
+        """Durable per-row stats copy in this node's results_dir (survives on the client)."""
+        try:
+            persistent_dir = getattr(self, 'results_dir', "/workspace/gmic_results")
+            os.makedirs(persistent_dir, exist_ok=True)
+            rec = {"site": site, "method": method_tag, "src_round": int(round_n), **metrics}
+            out = os.path.join(persistent_dir,
+                               f"{site}_salvage_{method_tag}_round{int(round_n)}_metrics.json")
+            with open(out, "w") as f:
+                json.dump(rec, f, indent=2)
+        except Exception as e:
+            self.log_warning(fl_ctx, f"[salvage] could not write stats json: {e}")
+
     def _salvage_round(self, fl_ctx: FLContext, shareable: Shareable, incoming) -> Shareable:
         """Test-only salvage of an interrupted run: reconstruct + evaluate per-round globals.
 
@@ -1062,9 +1075,11 @@ class GMICFederatedExecutor(Executor):
             if "val" in breasts and "test" in breasts:
                 m = endpoint_metrics(breasts["val"][0], breasts["val"][1],
                                      breasts["test"][0], breasts["test"][1])
-                # Per-site paper row, logged at THIS node (covers sites with no file access via logs).
+                # Per-site paper row: logged AND written to a durable JSON in this node's results_dir
+                # (alongside the prediction CSVs), so it survives on the client regardless of logs.
                 self.log_info(fl_ctx, f"[salvage-stats] {method_tag} src_round={int(src_round)} "
                                       + format_endpoint(client, m))
+                self._write_salvage_json(fl_ctx, client, method_tag, int(src_round), m)
             return breasts
 
         # Ship each site's de-identified breast-level (prob,label) to the server so it can log BOTH
@@ -1077,8 +1092,22 @@ class GMICFederatedExecutor(Executor):
                                    "y": [int(x) for x in breasts[s][1]]} for s in breasts}}
         records = []
 
+        # (0) The server attaches the POOLED rows it computed last round to this round's broadcast
+        # (via SalvageShareableGenerator). Log them here and write a durable client-side copy, so the
+        # pooled endpoint lives on the clients too (two-way: server log/jsonl + every client).
+        try:
+            raw_pooled = shareable.get_header("salvage_pooled_results")
+            if raw_pooled:
+                for row in (json.loads(raw_pooled) if isinstance(raw_pooled, str) else raw_pooled):
+                    self.log_info(fl_ctx, f"[salvage-pooled] (from server) src_round={row.get('src_round')} "
+                                          + format_endpoint("POOLED", row))
+                    self._write_salvage_json(fl_ctx, "POOLED", "incoming_global",
+                                             int(row.get("src_round", -1)), row)
+        except Exception as e:
+            self.log_warning(fl_ctx, f"[salvage] reading pooled-from-server failed: {e}")
+
         # (1) Evaluate the reconstructed global broadcast this round (aggregate of last submission).
-        if current_round >= 1 and incoming is not None:
+        if current_round >= 1 and current_round - 1 < K and incoming is not None:
             src = int(rounds[current_round - 1])
             self._underlying.load_state_dict(self._ensure_torch_state(incoming, fl_ctx), strict=False)
             self.log_info(fl_ctx, f"[salvage] evaluating reconstructed global (from round-{src} contributions)")

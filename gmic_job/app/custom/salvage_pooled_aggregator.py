@@ -30,6 +30,7 @@ from nvflare.app_common.aggregators.intime_accumulate_model_aggregator import (
     InTimeAccumulateWeightedAggregator,
 )
 
+import salvage_bus
 from salvage_metrics import endpoint_metrics, format_endpoint
 
 HEADER = "salvage_stats"
@@ -93,8 +94,10 @@ class SalvagePooledAggregator(InTimeAccumulateWeightedAggregator):
         try:
             for sr, splits in sorted(self._pool.items()):
                 if "val" in splits and "test" in splits:
-                    self._emit(fl_ctx, "pooled", "incoming_global", sr, "POOLED",
-                               self._endpoint_from_splits(splits))
+                    m = self._endpoint_from_splits(splits)
+                    self._emit(fl_ctx, "pooled", "incoming_global", sr, "POOLED", m)
+                    # Queue for delivery back to the clients on the next broadcast (two-way copy).
+                    salvage_bus.push({"method": "incoming_global", "src_round": int(sr), **m})
                 else:
                     self.log_warning(fl_ctx, f"[salvage-pooled] src_round={sr}: missing val/test from "
                                              f"some site; skipping pooled (have {sorted(splits)})")

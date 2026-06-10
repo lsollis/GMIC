@@ -2,40 +2,36 @@
 
 Salvage an interrupted run with no resume/retraining. A test-only federated job reconstructs the
 shared global at chosen rounds (train-size-weighted aggregation of the per-site SENT weights),
-scores val+test, dumps predictions, and **computes the paper stats during the run** — all logged to
-the **server**, whose log persists past job deletion (see "Where the output lands" below):
+scores val+test, dumps predictions, and **computes the paper stats during the run**, written BOTH on
+the clients and on the server (two-way, multiple copies):
 
 - **Per-site** rows (breast-level AUC + DeLong CI, Youden(val)→test sens/spec + Wilson CIs) for every
-  site and both model classes — `[salvage-site] method=... src_round=... site=...`.
-- **Pooled** (the one endpoint needing cross-site fusion) for the shared global —
-  `[salvage-pooled] ... src_round=...`.
+  site and both model classes — `[salvage-site] / [salvage-stats]`.
+- **Pooled** (the one endpoint needing cross-site fusion) for the shared global — `[salvage-pooled]`.
 
-Each client computes its own breast-level (prob, label) and ships it to the server, which logs both
-the per-site and pooled rows centrally — so you get HPU's numbers without touching the HPU node. The
-clients also log their own `[salvage-stats]` rows locally (convenience). `tools/salvage_stats.py`
-reproduces the identical numbers offline from gathered CSVs. Estimators are shared
-(`gmic_job_hpu/app/custom/salvage_metrics.py`); the server per-site/pooled paths are proven equal to
-the offline ones.
+`tools/salvage_stats.py` reproduces the identical numbers offline from gathered CSVs. Estimators are
+shared (`.../salvage_metrics.py`); the server per-site/pooled paths are proven equal to the offline
+ones.
 
-## Where the output lands (and why it survives job deletion)
+## Where the output lands (multiple copies, two directions)
 
-The NVFlare job workspace is deleted when the job finishes, so the salvage stats are logged on the
-**server**, whose log is redirected to a mounted path:
-- `NVFL_LOG_ROOT=/workspace/server_logs` → `<server-host-dir>/server_logs/log.txt`
-  (site_folders/server/docker-compose.yml) — NVFlare's `log.txt`, includes every component log line.
-- `<server-host-dir>/server_logs/server_console.log` — raw `docker logs` tee
-  (site_folders/server/run_server.sh).
-- `<server-host-dir>/server_logs/salvage_stats.jsonl` — durable machine-readable copy, one JSON row
-  per result (written by the aggregator's `stats_out_dir=/workspace/server_logs`).
+**On each client** (its `results_dir` = `/workspace/data/processed/<run>/`, persists with the client
+job folder):
+- `{site}_predictions_{method}_round{N}_{val,test}.csv` — raw breast/view predictions.
+- `{site}_salvage_{method}_round{N}_metrics.json` — that site's computed per-site row (durable file).
+- `POOLED_salvage_incoming_global_round{N}_metrics.json` — the pooled row, **pushed back from the
+  server** so the clients hold it too.
+- client log: `[salvage-stats]` (its own per-site) and `[salvage-pooled] (from server)`.
 
-To confirm this capture works on a PRIOR run: check that `<server-host-dir>/server_logs/log.txt`
-exists and contains component output (e.g. aggregation / `IntimeModelSelector` lines). If it does, the
-salvage `[salvage-site]`/`[salvage-pooled]` lines will land there too.
+**On the server** (`<server-host-dir>/server_logs/`, mounted via `NVFL_LOG_ROOT=/workspace/server_logs`
+so it survives job-workspace deletion — see site_folders/server/docker-compose.yml + run_server.sh):
+- `log.txt` and `server_console.log` — `[salvage-site]` (all sites) and `[salvage-pooled]`.
+- `salvage_stats.jsonl` — durable machine-readable copy, one JSON row per result.
 
-Client-side: prediction CSVs, checkpoints, and `global_trajectory/` persist in each node's
-`results_dir` (`/workspace/data/processed/<run>/`). Client `self.log_info` lines (incl. the local
-`[salvage-stats]`) go to the transient NVFlare client workspace unless that node tees its console —
-the committed HPU/Moffitt containers do not, which is exactly why the stats are routed to the server.
+How the pooled flows back to the clients: the aggregator computes pooled in `aggregate()` and queues
+it on `salvage_bus`; `SalvageShareableGenerator` drains the queue into the next round's broadcast
+header (the reliable server→client channel), which the client reads in `_salvage_round`. Fully
+defensive — if that channel ever fails, pooled still lives on the server and is recomputable offline.
 
 ## What gets evaluated, per configured round N
 
@@ -56,11 +52,13 @@ the committed HPU/Moffitt containers do not, which is exactly why the stats are 
   SENT weights; falls back to `{site}_gmic_model_round_{N}.pth`). Defaults to `results_dir` if unset.
 
 `config_fed_server.json`:
-- `"num_rounds": 7` — **one more** than `len(salvage_eval_rounds)` (trailing round evaluates the last
-  reconstruction). **Revert to your training value (e.g. 40+) for a normal run.**
-- aggregator swapped to `salvage_pooled_aggregator.SalvagePooledAggregator` — a drop-in superset of
-  `InTimeAccumulateWeightedAggregator`: identical weighted aggregation, plus the pooled side-channel.
-  Safe to leave in place for normal training (dormant when no salvage header is sent).
+- `"num_rounds": 8` — `len(salvage_eval_rounds) + 2` (one trailing round to evaluate the last
+  reconstruction, one more so its pooled row flushes back to the clients). **Revert to your training
+  value (e.g. 40+) for a normal run.**
+- aggregator → `salvage_pooled_aggregator.SalvagePooledAggregator` and shareable_generator →
+  `salvage_shareable_generator.SalvageShareableGenerator` — drop-in supersets of the stock components
+  (identical aggregation/broadcast, plus the stats side-channels). Safe to leave for normal training
+  (dormant when no salvage header is present).
 
 No training happens; each round only loads weights and runs eval, so the HPU-dropout window is
 seconds. Weighting is the freshly-preprocessed `train_size` (matches the original aggregation at
@@ -68,12 +66,18 @@ epochs=1) — computed automatically per site, nothing to supply.
 
 ## Run it
 
-Submit the `gmic_job_hpu` job. Read everything from the persistent SERVER log:
+Submit the `gmic_job_hpu` job. Read the results from EITHER side:
 
 ```
-grep "\[salvage-site\]"   <server-host-dir>/server_logs/log.txt   # per-site rows, all sites, both models
+# clients (per node results_dir; persists with the client job folder)
+cat  <run>/{site}_salvage_*_metrics.json          # per-site rows for that node
+cat  <run>/POOLED_salvage_*_metrics.json          # pooled rows (pushed back from server)
+grep "\[salvage-"  <client log>                   # [salvage-stats] + [salvage-pooled] (from server)
+
+# server (persists past job deletion)
+grep "\[salvage-site\]"   <server-host-dir>/server_logs/log.txt   # per-site, all sites, both models
 grep "\[salvage-pooled\]" <server-host-dir>/server_logs/log.txt   # pooled rows
-cat                       <server-host-dir>/server_logs/salvage_stats.jsonl   # machine-readable copy
+cat                       <server-host-dir>/server_logs/salvage_stats.jsonl   # machine-readable
 ```
 
 **Built-in pipeline check (free):** `deployed_local` val AUC at round N reproduces the original logged
