@@ -357,6 +357,13 @@ class GMICFederatedExecutor(Executor):
             self.cache_incoming_global = bool(cache_incoming_global)
             self.resume_from_local_round = int(resume_from_local_round)
             self.resume_ckpt_dir = resume_ckpt_dir
+            # LOGICAL-round offset for resumed runs: NVFlare restarts current_round at 0 on a resume,
+            # which would overwrite/misnumber the per-round caches (global_trajectory, incoming_global,
+            # local ckpts) that the Ditto replay relies on. Resuming from round N (reseed at round 0,
+            # first new training at round 1 == logical N+1) -> stamp artifacts at current_round + N so
+            # the trajectory stays contiguous across however many crash-resume segments it takes.
+            # 0 for a fresh run (resume_from_local_round=-1), so normal runs are byte-for-byte unchanged.
+            self._round_offset = self.resume_from_local_round if self.resume_from_local_round >= 0 else 0
             self.salvage_eval_rounds = [int(r) for r in salvage_eval_rounds] if salvage_eval_rounds else []
             self.salvage_ckpt_dir = salvage_ckpt_dir
             # Guardrail: balanced sampler + a large pos_weight double-counts the imbalance
@@ -732,9 +739,16 @@ class GMICFederatedExecutor(Executor):
 
         try:
             # --- round headers ---
+            # current_round is the RAW NVFlare counter (restarts at 0 on resume) -> use it for control
+            # flow (reseed/baseline at ==0, test at ==total_rounds-1). logical_round adds the resume
+            # offset and is what stamps every persisted artifact + metric, so a multi-segment (crash-
+            # resumed) run yields one contiguous round numbering. Equal to current_round on a fresh run.
             current_round = int(shareable.get_header(AppConstants.CURRENT_ROUND, 0))
             total_rounds = int(shareable.get_header(AppConstants.NUM_ROUNDS, 1))
-            self.log_info(fl_ctx, f"Starting round {current_round}/{total_rounds} - Train+Validate+Test")
+            logical_round = current_round + self._round_offset
+            self.log_info(fl_ctx, f"Starting round {current_round}/{total_rounds}"
+                                  + (f" (logical {logical_round})" if self._round_offset else "")
+                                  + " - Train+Validate+Test")
 
             # Per-run config echo so sweep results can be matched to the intended config from
             # the log. Show only the lambda(s) that are ACTIVE for the selected method.
@@ -818,17 +832,17 @@ class GMICFederatedExecutor(Executor):
             # Saved BEFORE training so a mid-train crash still leaves the round's global on disk.
             if getattr(self, "cache_incoming_global", False) and incoming is not None:
                 try:
-                    self._save_incoming_global(fl_ctx, current_round, incoming)
+                    self._save_incoming_global(fl_ctx, logical_round, incoming)
                 except Exception as e:
-                    self.log_warning(fl_ctx, f"[recv-global] save failed for round {current_round}: {e}")
+                    self.log_warning(fl_ctx, f"[recv-global] save failed for round {logical_round}: {e}")
                 # Per-round eval + prediction dump on the received global (self.model right
                 # after _consume_global, i.e. the aggregate as this site consumes it). Done
                 # here, BEFORE training mutates the weights, so best-global selection can be
                 # done offline by val AUC with test metrics + preds already on disk.
                 try:
-                    self._track_incoming_global(fl_ctx, current_round)
+                    self._track_incoming_global(fl_ctx, logical_round)
                 except Exception as e:
-                    self.log_warning(fl_ctx, f"[incoming-global] eval failed for round {current_round}: {e}")
+                    self.log_warning(fl_ctx, f"[incoming-global] eval failed for round {logical_round}: {e}")
 
             # === NUCLEAR OPTION: FORCE RANDOM INIT FOR THIS RUN ===
             # self._reset_model_weights()
@@ -851,9 +865,9 @@ class GMICFederatedExecutor(Executor):
             # update regularizes toward w^t). Gated on cache_global_trajectory (default off).
             if getattr(self, "cache_global_trajectory", False):
                 try:
-                    self._save_global_round(fl_ctx, current_round, final_state)
+                    self._save_global_round(fl_ctx, logical_round, final_state)
                 except Exception as e:
-                    self.log_warning(fl_ctx, f"[global-cache] save failed for round {current_round}: {e}")
+                    self.log_warning(fl_ctx, f"[global-cache] save failed for round {logical_round}: {e}")
 
             # Deployed/evaluated model = best-val OF THIS ROUND. Load it into the global-tracked
             # model for eval/dumps only (non-Ditto; Ditto deploys v). The SENT w stays = final_state.
@@ -863,7 +877,7 @@ class GMICFederatedExecutor(Executor):
                 try:
                     self._underlying.load_state_dict(self.early_stopper.best_state, strict=False)
                     self.log_info(fl_ctx, f"Deployed/eval = best-val-of-round (val_auc={self.early_stopper.best:.4f}); sent w = final-epoch")
-                    self._save_best_model(fl_ctx, {"auc": float(self.early_stopper.best)}, shareable, model_type="best_val_round")
+                    self._save_best_model(fl_ctx, {"auc": float(self.early_stopper.best)}, shareable, model_type="best_val_round", round_idx=logical_round)
                 except Exception as e:
                     self.log_warning(fl_ctx, f"Failed to load best-val weights for eval: {e}")
 
@@ -881,7 +895,7 @@ class GMICFederatedExecutor(Executor):
                 num_examples = max(1, self.batch_size)
 
             if not abort_signal.triggered:
-                self._save_local_model(fl_ctx, shareable, model=deployed)
+                self._save_local_model(fl_ctx, shareable, model=deployed, round_idx=logical_round)
 
             # --- VAL (on the deployed model: v for Ditto-family, else w) ---
             self.log_info(fl_ctx, "Phase 2: Validation...")
@@ -892,7 +906,7 @@ class GMICFederatedExecutor(Executor):
             # Per-site validation metric for the deployed model (offline ranking / fairness).
             self.log_info(
                 fl_ctx,
-                f"[per-site-metric] site={fl_ctx.get_identity_name()} round={current_round} "
+                f"[per-site-metric] site={fl_ctx.get_identity_name()} round={logical_round} "
                 f"method={self.method} deployed_val_auc={val_core.get('auc', float('nan')):.4f}"
             )
 
@@ -900,7 +914,7 @@ class GMICFederatedExecutor(Executor):
             if val_core.get('auc', -1) > self.best_metrics.get('val_auc', -1):
                 self.best_metrics['val_auc'] = val_core['auc']
                 try:
-                    self._save_best_model(fl_ctx, {"auc": val_core['auc']}, shareable, model_type="best_val_overall", model=deployed)
+                    self._save_best_model(fl_ctx, {"auc": val_core['auc']}, shareable, model_type="best_val_overall", model=deployed, round_idx=logical_round)
                 except Exception:
                     pass
 
@@ -912,14 +926,14 @@ class GMICFederatedExecutor(Executor):
                 if test_core.get('auc', -1) > self.best_metrics.get('test_auc', -1):
                     self.best_metrics['test_auc'] = test_core['auc']
                     try:
-                        self._save_best_model(fl_ctx, test_core, shareable, model_type="best_test_overall", model=deployed)
+                        self._save_best_model(fl_ctx, test_core, shareable, model_type="best_test_overall", model=deployed, round_idx=logical_round)
                     except Exception:
                         pass
                 # End-of-run prediction dump for offline AUC / DeLong CIs / cross-site sigma(AUC).
                 for _split in ("val", "test"):
                     try:
                         self._dump_predictions(fl_ctx, split=_split, model=deployed,
-                                               round_idx=current_round, method_tag=self.method)
+                                               round_idx=logical_round, method_tag=self.method)
                     except Exception as e:
                         self.log_warning(fl_ctx, f"[predictions] dump ({_split}) failed: {e}")
             else:
@@ -931,7 +945,7 @@ class GMICFederatedExecutor(Executor):
             # checkpoint -- standard FedAvg/FedProx/FedBN expect the current round's local update.
             updated_weights = {k: v.detach().cpu().numpy() for k, v in final_state.items()}
 
-            combined_metrics = {**train_metrics, **val_metrics, **test_metrics, "round": int(current_round)}
+            combined_metrics = {**train_metrics, **val_metrics, **test_metrics, "round": int(logical_round)}
             if 'val_auc' not in combined_metrics and 'val_auc' in val_metrics:
                 combined_metrics['val_auc'] = val_metrics['val_auc']
 
@@ -1864,13 +1878,13 @@ class GMICFederatedExecutor(Executor):
         self.log_info(fl_ctx, f"[recv-global] saved received aggregate (round {int(round_idx)}) -> {out}")
         return out
 
-    def _save_local_model(self, fl_ctx: FLContext, shareable: Shareable, model=None):
+    def _save_local_model(self, fl_ctx: FLContext, shareable: Shareable, model=None, round_idx=None):
         """Save current (deployed) model state"""
         persistent_dir = getattr(self, 'results_dir', "/workspace/gmic_results")
         os.makedirs(persistent_dir, exist_ok=True)
 
         client_name = fl_ctx.get_identity_name()
-        current_round = shareable.get_header(AppConstants.CURRENT_ROUND)
+        current_round = round_idx if round_idx is not None else shareable.get_header(AppConstants.CURRENT_ROUND)
 
         save_model = model if model is not None else self.model
         model_path = f"{persistent_dir}/{client_name}_gmic_model_round_{current_round}.pth"
@@ -1878,13 +1892,13 @@ class GMICFederatedExecutor(Executor):
         self.log_info(fl_ctx, f"Model saved: {model_path}")
 
 
-    def _save_best_model(self, fl_ctx, metrics, shareable: Shareable, model_type="best", model=None):
+    def _save_best_model(self, fl_ctx, metrics, shareable: Shareable, model_type="best", model=None, round_idx=None):
         """Save best performing (deployed) model (expects metrics with keys including auc)."""
         persistent_dir = getattr(self, 'results_dir', "/workspace/gmic_results")
         os.makedirs(persistent_dir, exist_ok=True)
 
         client_name = fl_ctx.get_identity_name()
-        current_round = shareable.get_header(AppConstants.CURRENT_ROUND)
+        current_round = round_idx if round_idx is not None else shareable.get_header(AppConstants.CURRENT_ROUND)
 
         save_model = model if model is not None else self.model
         model_path = f"{persistent_dir}/{client_name}_{model_type}_gmic_model.pth"
