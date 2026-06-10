@@ -157,6 +157,13 @@ def build_runs(a):
     anchor); then each group {global, local, fusion} is varied over --group-values in turn while the
     other two stay at the anchor. method=ditto_modulewise.
     """
+    if a.fedavg:
+        # One FedAvg run that caches the per-round global trajectory (the anchor for Ditto replay).
+        # Same simulator/data/seed as the ditto sweeps, so replay reproduces the interleaved baseline;
+        # and being simulator-only it never touches HPU (no nightly crashes / resume needed).
+        return [{"label": "fedavg", "display": "fedavg",
+                 "overrides": {"method": "fedavg", "cache_incoming_global": True,
+                               "cache_global_trajectory": True}}]
     if not a.modulewise:
         runs = []
         for lam in [float(x) for x in a.lambdas.split(",") if x.strip()]:
@@ -309,6 +316,9 @@ def main():
                          "lambda field(s), num_rounds, and the output/tb/log paths per run.")
     ap.add_argument("--lambdas", default="0.01,0.05,0.1,0.5,1.0,2.0",
                     help="scalar Ditto: comma-separated ditto_lambda values")
+    ap.add_argument("--fedavg", action="store_true",
+                    help="run ONE FedAvg job that caches the per-round global trajectory (the anchor "
+                         "for Ditto replay via replay_sweep.py); no sweep, no HPU")
     ap.add_argument("--modulewise", action="store_true",
                     help="sweep method=ditto_modulewise per-group lambdas (one-at-a-time, anchored)")
     ap.add_argument("--anchor", type=float, default=0.1,
@@ -414,6 +424,17 @@ def main():
                 del running[pi]
         if running:
             time.sleep(a.poll)
+
+    # FedAvg trajectory run: no sweep to collect -- just point at the cached global trajectory.
+    if a.fedavg:
+        print("\n[fedavg] done. Per-round global trajectory (anchor for Ditto replay) cached at:")
+        for c in clients:
+            print(f"  {c}: {a.output_base}/fedavg/{c}/incoming_global/{c}_incoming_global_round_*.pth")
+        print("\nNext: python ditto_sweep/replay_sweep.py --base-job %s \\\n"
+              "        --traj-dir %s/fedavg/%s/incoming_global --traj-prefix %s --lambdas 0.05,0.1,0.5 \\\n"
+              "        --clients %s --gpu 0 --out %s/ditto_replay_summary.json"
+              % (a.base_job, a.output_base, clients[0], clients[0], ",".join(clients), a.work_root))
+        return
 
     # Collect + report
     for r in runs:
