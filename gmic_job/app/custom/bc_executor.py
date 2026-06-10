@@ -1067,19 +1067,24 @@ class GMICFederatedExecutor(Executor):
                                       + format_endpoint(client, m))
             return breasts
 
+        # Ship each site's de-identified breast-level (prob,label) to the server so it can log BOTH
+        # the per-site rows AND the pooled row to the PERSISTENT server log (/workspace/server_logs),
+        # which survives the job-workspace deletion -- and reaches sites whose own logs/files are not
+        # accessible (e.g. HPU). Scores+labels only: no images, no IDs.
+        def _record(method_tag, src_round, breasts):
+            return {"site": client, "method": method_tag, "src_round": int(src_round),
+                    "splits": {s: {"p": [float(x) for x in breasts[s][0]],
+                                   "y": [int(x) for x in breasts[s][1]]} for s in breasts}}
+        records = []
+
         # (1) Evaluate the reconstructed global broadcast this round (aggregate of last submission).
-        pooled_payload = None
         if current_round >= 1 and incoming is not None:
             src = int(rounds[current_round - 1])
             self._underlying.load_state_dict(self._ensure_torch_state(incoming, fl_ctx), strict=False)
             self.log_info(fl_ctx, f"[salvage] evaluating reconstructed global (from round-{src} contributions)")
             gb = _eval_and_dump(self.model, src, "incoming_global")
-            # Ship this site's breast-level (prob,label) for the SHARED global to the server so it can
-            # compute the POOLED AUC+CI (the one endpoint that needs cross-site fusion). De-identified
-            # scores+labels only -- no images, no IDs. The server aggregator logs the pooled result.
-            pooled_payload = {"src_round": src,
-                              "splits": {s: {"p": [float(x) for x in gb[s][0]],
-                                             "y": [int(x) for x in gb[s][1]]} for s in gb}}
+            if gb:
+                records.append(_record("incoming_global", src, gb))
 
         # Per-site weight = train-set size from the freshly preprocessed (cached) data.
         try:
@@ -1102,7 +1107,9 @@ class GMICFederatedExecutor(Executor):
                         break
             self._underlying.load_state_dict(sd, strict=False)
             self.log_info(fl_ctx, f"[salvage] loaded own round-{n} sent weights <- {path}")
-            _eval_and_dump(self._underlying, n, "deployed_local")
+            db = _eval_and_dump(self._underlying, n, "deployed_local")
+            if db:
+                records.append(_record("deployed_local", n, db))
             weight = num_examples
             self.log_info(fl_ctx, f"[salvage] submitting round-{n} weights weight(train_size)={weight}")
         else:
@@ -1117,14 +1124,14 @@ class GMICFederatedExecutor(Executor):
             params=updated_weights, params_type=ParamsType.FULL, metrics=metrics, meta=model_meta
         )
         reply = FLModelUtils.to_shareable(fl_model_out)
-        # Header channel for the server-side pooled stats (read by SalvagePooledAggregator).
-        # JSON string so it survives serialization regardless of FOBS config; absent on the
-        # trailing round / sites with no data -> server simply skips pooling that round.
-        if pooled_payload is not None:
+        # Header channel for the server-side stats logger (read by SalvagePooledAggregator). JSON
+        # string so it survives serialization regardless of FOBS config; absent on the trailing
+        # round / sites with no data -> server simply skips that contribution.
+        if records:
             try:
-                reply.set_header("salvage_pooled_preds", json.dumps(pooled_payload))
+                reply.set_header("salvage_stats", json.dumps(records))
             except Exception as e:
-                self.log_warning(fl_ctx, f"[salvage] could not attach pooled preds: {e}")
+                self.log_warning(fl_ctx, f"[salvage] could not attach stats payload: {e}")
         reply.set_return_code(ReturnCode.OK)
         return reply
 

@@ -2,17 +2,40 @@
 
 Salvage an interrupted run with no resume/retraining. A test-only federated job reconstructs the
 shared global at chosen rounds (train-size-weighted aggregation of the per-site SENT weights),
-scores val+test, dumps predictions, and **computes the paper stats during the run**:
+scores val+test, dumps predictions, and **computes the paper stats during the run** — all logged to
+the **server**, whose log persists past job deletion (see "Where the output lands" below):
 
-- **Per-site** rows (breast-level AUC + DeLong CI, Youden(val)→test sens/spec + Wilson CIs) are
-  computed at each node and printed to that node's log — so you get every site, including ones you
-  can't pull files from. Grep `[salvage-stats]`.
-- **Pooled** (the one endpoint needing cross-site fusion) is computed on the **server** and printed
-  to the server log. Grep `[salvage-pooled]`.
+- **Per-site** rows (breast-level AUC + DeLong CI, Youden(val)→test sens/spec + Wilson CIs) for every
+  site and both model classes — `[salvage-site] method=... src_round=... site=...`.
+- **Pooled** (the one endpoint needing cross-site fusion) for the shared global —
+  `[salvage-pooled] ... src_round=...`.
 
-`tools/salvage_stats.py` reproduces the identical numbers offline from gathered CSVs (verification, or
-when you prefer files to logs). Estimators are shared (`gmic_job_hpu/app/custom/salvage_metrics.py`)
-and the server-pooled path is proven equal to the offline pooled.
+Each client computes its own breast-level (prob, label) and ships it to the server, which logs both
+the per-site and pooled rows centrally — so you get HPU's numbers without touching the HPU node. The
+clients also log their own `[salvage-stats]` rows locally (convenience). `tools/salvage_stats.py`
+reproduces the identical numbers offline from gathered CSVs. Estimators are shared
+(`gmic_job_hpu/app/custom/salvage_metrics.py`); the server per-site/pooled paths are proven equal to
+the offline ones.
+
+## Where the output lands (and why it survives job deletion)
+
+The NVFlare job workspace is deleted when the job finishes, so the salvage stats are logged on the
+**server**, whose log is redirected to a mounted path:
+- `NVFL_LOG_ROOT=/workspace/server_logs` → `<server-host-dir>/server_logs/log.txt`
+  (site_folders/server/docker-compose.yml) — NVFlare's `log.txt`, includes every component log line.
+- `<server-host-dir>/server_logs/server_console.log` — raw `docker logs` tee
+  (site_folders/server/run_server.sh).
+- `<server-host-dir>/server_logs/salvage_stats.jsonl` — durable machine-readable copy, one JSON row
+  per result (written by the aggregator's `stats_out_dir=/workspace/server_logs`).
+
+To confirm this capture works on a PRIOR run: check that `<server-host-dir>/server_logs/log.txt`
+exists and contains component output (e.g. aggregation / `IntimeModelSelector` lines). If it does, the
+salvage `[salvage-site]`/`[salvage-pooled]` lines will land there too.
+
+Client-side: prediction CSVs, checkpoints, and `global_trajectory/` persist in each node's
+`results_dir` (`/workspace/data/processed/<run>/`). Client `self.log_info` lines (incl. the local
+`[salvage-stats]`) go to the transient NVFlare client workspace unless that node tees its console —
+the committed HPU/Moffitt containers do not, which is exactly why the stats are routed to the server.
 
 ## What gets evaluated, per configured round N
 
@@ -45,11 +68,12 @@ epochs=1) — computed automatically per site, nothing to supply.
 
 ## Run it
 
-Submit the `gmic_job_hpu` job. Read the results from the logs:
+Submit the `gmic_job_hpu` job. Read everything from the persistent SERVER log:
 
 ```
-grep "\[salvage-stats\]"  <each client log>     # per-site rows (all sites)
-grep "\[salvage-pooled\]" <server log>          # pooled rows
+grep "\[salvage-site\]"   <server-host-dir>/server_logs/log.txt   # per-site rows, all sites, both models
+grep "\[salvage-pooled\]" <server-host-dir>/server_logs/log.txt   # pooled rows
+cat                       <server-host-dir>/server_logs/salvage_stats.jsonl   # machine-readable copy
 ```
 
 **Built-in pipeline check (free):** `deployed_local` val AUC at round N reproduces the original logged

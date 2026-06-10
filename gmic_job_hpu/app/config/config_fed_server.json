@@ -48,7 +48,8 @@
       "id": "aggregator",
       "path": "salvage_pooled_aggregator.SalvagePooledAggregator",
       "args": {
-        "expected_data_kind": "WEIGHTS"
+        "expected_data_kind": "WEIGHTS",
+        "stats_out_dir": "/workspace/server_logs"
       }
     },
     {
