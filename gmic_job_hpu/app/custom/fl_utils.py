@@ -529,6 +529,11 @@ def replay_personalized(v_model, v_optimizer, anchor_trajectory, loss_fn, proxim
                 v_optimizer.zero_grad(set_to_none=True)
                 outputs = v_model(inputs)
                 loss = loss_fn(outputs, targets) + proximal_fn(v_model, ref, lam)
+                # Stability guard (no effect on finite losses, so the bit-identical equivalence test
+                # is unchanged): skip a non-finite step so an extreme lambda can't poison the
+                # carried-forward v for the rest of the replay. Mirrors the interleaved personal pass.
+                if not torch.isfinite(loss):
+                    continue
                 loss.backward()
                 v_optimizer.step()
     return v_model
