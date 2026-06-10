@@ -120,6 +120,7 @@ class GMICFederatedExecutor(Executor):
             random_seed: int = 42,
             output_dir: str = "/workspace/data/processed",
             preprocess_cache_dir: str | None = None,  # stable crop/cache dir, independent of run output_dir
+            preprocess_cache_dir_map: dict | None = None,  # {identity: cache_dir}; per-client cache (simulator)
             results_dir: str = "/workspace/gmic_results_centralized",
             out_dir: str | None = None,
             num_processes: int = 4,
@@ -232,6 +233,7 @@ class GMICFederatedExecutor(Executor):
             # Preprocessing crops/cache live here, decoupled from the run output_dir so a new
             # run (new output_dir) reuses existing crops without copying. Default: output_dir.
             self.preprocess_cache_dir = preprocess_cache_dir or output_dir
+            self.preprocess_cache_dir_map = preprocess_cache_dir_map or {}
             self.log_file = log_file
             self.file_integrity_check = file_integrity_check
             self.fail_on_integrity_error = fail_on_integrity_error
@@ -376,6 +378,37 @@ class GMICFederatedExecutor(Executor):
             self._recover_persisted_best_metrics()
         except Exception as e:
             self._logger.warning("[EXEC][WARN] Failed to recover persisted best metrics: %s", e, exc_info=True)
+
+        # 0a. Per-client path resolution for SIMULATOR runs (all clients share one filesystem):
+        #   - {site} in any path config -> this client's FL identity, so output/cache/tb/log
+        #     stay separate per client (e.g. output_dir="/ws/sim/ditto/l0.1/{site}").
+        #   - preprocess_cache_dir_map {identity: dir} -> per-client crop cache (the unprefixed
+        #     crops would otherwise collide). Resolved before the {site} pass so a mapped dir may
+        #     itself contain {site}. On real (one-host-per-client) deployments neither is set and
+        #     this is a no-op.
+        ident = self._identity or ""
+        def _sub_site(p):
+            return p.replace("{site}", ident) if (isinstance(p, str) and "{site}" in p and ident) else p
+        if self.preprocess_cache_dir_map:
+            mapped_cache = self.preprocess_cache_dir_map.get(self._identity)
+            if mapped_cache:
+                self.preprocess_cache_dir = mapped_cache
+            else:
+                self._logger.warning(
+                    "[EXEC] preprocess_cache_dir_map set but identity=%r not a key (keys=%s); "
+                    "using preprocess_cache_dir=%s", self._identity,
+                    list(self.preprocess_cache_dir_map.keys()), self.preprocess_cache_dir,
+                )
+        self.output_dir = _sub_site(self.output_dir)
+        self.results_dir = _sub_site(self.results_dir)
+        self.preprocess_cache_dir = _sub_site(self.preprocess_cache_dir)
+        self.tb_log_dir = _sub_site(self.tb_log_dir)
+        self.log_file = _sub_site(self.log_file)
+        if ident and ("{site}" in str(getattr(self, "output_dir", "")) or self.preprocess_cache_dir_map):
+            self._logger.info(
+                "[EXEC] site paths resolved for %s: output_dir=%s preprocess_cache_dir=%s",
+                ident, self.output_dir, self.preprocess_cache_dir,
+            )
 
         # 0. Per-client data path: if a data_path_map is given, each client picks its OWN
         # CSV by FL identity (UHCC/HPU/RSNA-GCP), so all sites keep distinct filenames from
