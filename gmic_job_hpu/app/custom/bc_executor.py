@@ -52,13 +52,33 @@ from fl_utils import (
 )
 
 def _git_hash():
-    """Short git commit hash of the running code (best-effort; 'unknown' if unavailable).
+    """Short git commit of the running code (best-effort; 'unknown' if unavailable).
 
-    Echoed into [run-config] so the log records exactly what code ran (closes the
-    'which commit produced this run' forensic gap)."""
+    Echoed into [run-config] so the log records exactly what code ran. Resolution order,
+    designed so DEPLOYED NVFLARE jobs are attributable even though NVFLARE copies the
+    custom/ dir WITHOUT its .git (which is why `git` alone logged 'unknown'):
+      1. env var GMIC_GIT_COMMIT (a launcher / run script may set it), then
+      2. a GIT_COMMIT file next to this module -- stamp it before submitting with
+         `git rev-parse --short HEAD > app/custom/GIT_COMMIT`; it then travels with the job
+         to every client, then
+      3. `git rev-parse` in the source tree (dev / simulator-from-clone), then
+      4. 'unknown'.
+    """
+    env = os.environ.get("GMIC_GIT_COMMIT")
+    if env and env.strip():
+        return env.strip()
+    here = os.path.dirname(os.path.abspath(__file__))
+    try:
+        stamp = os.path.join(here, "GIT_COMMIT")
+        if os.path.isfile(stamp):
+            with open(stamp) as f:
+                val = f.read().strip()
+            if val:
+                return val
+    except Exception:
+        pass
     try:
         import subprocess
-        here = os.path.dirname(os.path.abspath(__file__))
         out = subprocess.run(["git", "-C", here, "rev-parse", "--short", "HEAD"],
                              capture_output=True, text=True, timeout=5)
         return out.stdout.strip() or "unknown"
@@ -593,8 +613,12 @@ class GMICFederatedExecutor(Executor):
 
         # 5b. Always initialize from the pretrained GMIC checkpoint (decision: fine-tune,
         # not train-from-scratch). The released checkpoint keys match this model 1:1
-        # except two benign items (missing '_device_ref' buffer, unexpected
-        # 'shared_rep_filter.weight'), so a clean load reports matched=258/259.
+        # except two benign items: missing '_device_ref' (an empty device-tracking buffer,
+        # carries no learned info) and unexpected 'shared_rep_filter.weight' (an auxiliary
+        # 256x256x4x4 conv head OUTSIDE the classification forward path; the GMIC variant
+        # that produced these checkpoints bolted it on after fusion_dnn -- this model's
+        # forward never uses it, so it is safely discarded). Backbones + all four output
+        # heads load 100%, so a clean load reports matched=258/259.
         # This makes "init from pretrained" robust and self-contained — independent of
         # whether the server persistor seeds round-0 with the same checkpoint — and is
         # what makes the round-0 baseline meaningful and `method=local` start pretrained.

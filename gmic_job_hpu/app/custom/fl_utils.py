@@ -223,8 +223,11 @@ def tolerant_load_pretrained(
     Tries strict=True first; on failure falls back to strict=False and reports
     exactly which keys matched, were missing, and were unexpected. The released
     GMIC checkpoints key 1:1 to this model EXCEPT for two cosmetic items:
-      - missing  '_device_ref'         (empty device buffer; carries no info)
-      - unexpected 'shared_rep_filter.weight' (a tensor from another GMIC variant)
+      - missing  '_device_ref'  (empty device-tracking buffer; carries no learned info)
+      - unexpected 'shared_rep_filter.weight'  (an auxiliary 256x256x4x4 conv head outside
+        the classification forward path; the source GMIC variant bolted it on after
+        fusion_dnn -- this model's forward never uses it, so it is safely discarded;
+        backbones + all four output heads still load 100%)
     so a clean load reports matched=258/259.
 
     Guards against a silent partial load: if the fraction of *backbone*

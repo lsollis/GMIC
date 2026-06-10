@@ -12,9 +12,14 @@ GPU, then reads each client's best personal val AUC and ranks λ by worst-site.
 
 - **Per-client isolation** on the shared filesystem: executor `data_path_map` (CSVs),
   `preprocess_cache_dir_map` (crops), and `{site}` path substitution.
-- **Crop cache** is fixed per site and shared across all λ runs → preprocessing happens
-  once. A 1-round **warmup** builds caches before any parallel run (auto-skipped if present).
+- **The sweep is read-only w.r.t. training data.** It requires the per-site crop caches to
+  already exist and never builds/modifies them — a hyperparameter sweep must not touch the
+  training data. Build the caches once, as a separate explicit step, with `--prepare-cache`
+  (or point `preprocess_cache_dir_map` at crops you already have). If caches are missing the
+  sweep fails fast instead of silently re-cropping.
 - **Concurrency**: up to one running job per GPU pool (default 2 pools × 3 GPUs).
+- **Attribution**: each rendered job is stamped with the repo commit (`app/custom/GIT_COMMIT`)
+  so the simulator runs log `git=<hash>` instead of `git=unknown`.
 
 ## Prerequisites on the DGX
 1. **All three sites' data present locally**, at the paths in
@@ -28,6 +33,12 @@ GPU, then reads each client's best personal val AUC and ranks λ by worst-site.
 ## Run
 ```bash
 cd ditto_sweep
+
+# 1) ONE-TIME data prep: build the per-site crop caches (the only step that writes data)
+python launcher.py --base-job ../gmic_job --prepare-cache \
+  --gpu-pools "1,2,3" --output-base /workspace/sim/ditto --work-root /workspace/sim/ditto_runs
+
+# 2) the sweep itself (read-only on training data)
 python launcher.py \
   --base-job ../gmic_job \
   --lambdas 0.01,0.05,0.1,0.5,1.0,2.0 \
@@ -36,8 +47,9 @@ python launcher.py \
   --output-base /workspace/sim/ditto \
   --work-root  /workspace/sim/ditto_runs
 ```
+- Skip step 1 if `preprocess_cache_dir_map` already points at built crops; the sweep checks
+  and **fails fast** if any site's cache is missing (it will not preprocess).
 - `--dry-run` renders jobs and prints the simulator commands without launching.
-- `--skip-warmup` if the caches are already built.
 - `--metric mean_site` to rank by mean instead of worst-site (worst-site is the default).
 
 ## Output

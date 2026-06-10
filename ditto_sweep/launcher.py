@@ -60,6 +60,19 @@ def _lam_str(lam: float) -> str:
     return s
 
 
+def _git_short(ref_dir):
+    """Short HEAD hash (+ -dirty) of the repo containing ref_dir, or None."""
+    try:
+        h = subprocess.run(["git", "-C", ref_dir, "rev-parse", "--short", "HEAD"],
+                           capture_output=True, text=True, timeout=5).stdout.strip()
+        if not h:
+            return None
+        dirty = subprocess.run(["git", "-C", ref_dir, "diff", "--quiet"]).returncode != 0
+        return h + ("-dirty" if dirty else "")
+    except Exception:
+        return None
+
+
 # --------------------------------------------------------------------------- job rendering
 def render_job(lam, rounds, base_job, templates_dir, work_root, output_base, clients):
     """Materialize a runnable simulator job dir for one lambda.
@@ -81,6 +94,13 @@ def render_job(lam, rounds, base_job, templates_dir, work_root, output_base, cli
     if os.path.isdir(dst_custom):
         shutil.rmtree(dst_custom)
     shutil.copytree(src_custom, dst_custom)
+    # Stamp the repo commit so the simulator run is attributable (the copied custom/ has no
+    # .git, so the executor's `git` probe would otherwise log git=unknown). _git_hash() reads
+    # this file. base_job lives in the repo, so resolve HEAD from there.
+    gh = _git_short(base_job)
+    if gh:
+        with open(os.path.join(dst_custom, "GIT_COMMIT"), "w") as f:
+            f.write(gh + "\n")
 
     # 2) client config: set ditto_lambda + per-lambda output paths ({site} preserved)
     client_cfg = _load_json(os.path.join(templates_dir, "config_fed_client.json"))
@@ -235,7 +255,9 @@ def main():
     ap.add_argument("--work-root", default="/workspace/sim/ditto_runs",
                     help="where rendered job dirs + simulator workspaces + run logs go")
     ap.add_argument("--metric", default="worst_site", choices=["worst_site", "mean_site"])
-    ap.add_argument("--skip-warmup", action="store_true", help="assume caches are already built")
+    ap.add_argument("--prepare-cache", action="store_true",
+                    help="ONLY build the per-site crop caches (1-round solo run), then exit. "
+                         "This is the explicit data-prep step; the sweep itself is read-only.")
     ap.add_argument("--poll", type=int, default=20, help="seconds between scheduler polls")
     ap.add_argument("--dry-run", action="store_true", help="render jobs + print plan, don't run")
     a = ap.parse_args()
@@ -264,23 +286,38 @@ def main():
             print("  would run:", " ".join(simulator_cmd(jobs[lam], ws, clients, pools[0], a.threads)))
         return
 
-    # Warmup: build the per-site crop caches once (solo) before any parallel runs, unless
-    # already present. This prevents two cold parallel runs from racing on the same cache.
-    if not a.skip_warmup and not caches_ready(a.templates_dir, clients):
-        print("[warmup] crop caches missing -> building once via a 1-round solo run "
+    # --prepare-cache: the ONLY mode that writes preprocessing data. Build the per-site crop
+    # caches once via a 1-round solo run, then exit. Kept separate from the sweep on purpose
+    # -- a hyperparameter sweep must not touch the training data.
+    if a.prepare_cache:
+        print(f"[prepare-cache] building per-site crop caches via a 1-round solo run "
               f"(lambda={_lam_str(lambdas[0])}, gpus={pools[0]})")
-        warm_job = render_job(lambdas[0], 1, a.base_job, a.templates_dir,
-                              a.work_root, a.output_base + "_warmup", clients)
-        ws = os.path.join(a.work_root, "ws_warmup")
-        proc, lf = launch(warm_job, ws, clients, pools[0], a.threads,
-                          os.path.join(a.work_root, "warmup.log"))
+        cache_job = render_job(lambdas[0], 1, a.base_job, a.templates_dir,
+                               a.work_root, a.output_base + "_cacheprep", clients)
+        ws = os.path.join(a.work_root, "ws_cacheprep")
+        proc, lf = launch(cache_job, ws, clients, pools[0], a.threads,
+                          os.path.join(a.work_root, "cacheprep.log"))
         rc = proc.wait()
         lf.close()
-        print(f"[warmup] done rc={rc}; caches_ready={caches_ready(a.templates_dir, clients)}")
-        if not caches_ready(a.templates_dir, clients):
-            print("[warmup] WARNING: caches still not detected; check warmup.log. Continuing.")
-    else:
-        print("[warmup] skipped (caches present or --skip-warmup).")
+        ok = caches_ready(a.templates_dir, clients)
+        print(f"[prepare-cache] done rc={rc}; caches_ready={ok}")
+        if not ok:
+            print("[prepare-cache] WARNING: caches still not detected; check cacheprep.log.")
+        return
+
+    # Sweep is READ-ONLY w.r.t. training data: it requires the per-site caches to already
+    # exist and never builds/modifies them. Fail fast (rather than silently re-cropping) so
+    # a missing cache can't turn the sweep into a data-writing job.
+    if not caches_ready(a.templates_dir, clients):
+        missing = {c: d for c, d in cache_paths(a.templates_dir, clients).items()
+                   if not (d and os.path.isfile(os.path.join(d, "processed_exam_list.pkl")))}
+        print("[error] crop caches are not built for: " + ", ".join(missing.keys()))
+        print("        the sweep is read-only and will NOT preprocess. Build caches once:")
+        print("          python launcher.py --base-job %s --prepare-cache [other args]" % a.base_job)
+        print("        (or point preprocess_cache_dir_map in templates/config_fed_client.json "
+              "at existing crops).")
+        sys.exit(2)
+    print("[run] caches present -> sweep is read-only on training data.")
 
     # Schedule the sweep across GPU pools (one running job per pool).
     pending = list(lambdas)

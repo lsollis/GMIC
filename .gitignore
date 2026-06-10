@@ -224,3 +224,6 @@ secrets.json
 # !LICENSE
 # !docker-compose.yml
 # !Dockerfile
+# Per-submit commit stamp (build artifact; reflects working tree, written by tools/stamp_git_commit.sh)
+**/app/custom/GIT_COMMIT
+GIT_COMMIT
