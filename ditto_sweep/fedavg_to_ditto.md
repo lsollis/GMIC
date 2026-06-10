@@ -6,71 +6,96 @@ pass never affects the global, so **one FedAvg run's per-round global trajectory
 for every λ**. `replay_personalized` reproduces the interleaved personal trajectory from that cache —
 proven bit-identical in `test_ditto_replay_equivalence.py`. So: run FedAvg once, replay Ditto N times.
 
-## Recommended: run FedAvg in the simulator (no HPU)
+The global trajectory is the per-round broadcast global, cached by `cache_incoming_global` as
+`incoming_global/<site>_incoming_global_round_{t}.pth` (`round_t` = `w^{t-1}`; round 0 = pretrained
+seed). It is **identical at every site**, so each node already holds the whole trajectory locally.
 
-The Ditto sweeps already run in the **simulator on the DGX** (all three sites' data local). For the
-replay to reproduce the interleaved sweep, the FedAvg trajectory must come from that **same simulator,
-data, and seed** — which also means it never touches HPU, so there are **no nightly crashes and no
-resume to manage**. The HPU-crash/numbering worry only applies to a *real-world* FedAvg run (next
-section); for informing Ditto, you don't need it.
+---
+
+## REAL-WORLD path (the 3 physical nodes)
+
+### 1. FedAvg real-world — `gmic_job_hpu`
+
+In `gmic_job_hpu/app/config/config_fed_client.json` set:
+- `"method": "fedavg"` (Ditto's global is FedAvg, not FedProx)
+- `"cache_incoming_global": true` (the anchor trajectory — keep all rounds)
+- remove/empty `"salvage_eval_rounds"` (so it's a normal training run, not salvage)
+- `"resume_from_local_round": -1` (fresh start)
+
+In `config_fed_server.json` set `"num_rounds"` to your target (e.g. 60), aggregator/shareable_generator
+stock (already reverted). Submit the job. Each node writes its `incoming_global/` trajectory to its
+`results_dir`.
+
+**Surviving nightly HPU crashes (numbering is now resume-safe).** Every per-round artifact is stamped
+`current_round + resume_from_local_round`, so a resumed segment continues the logical numbering instead
+of overwriting round 0. Per crash:
+1. Find the last **completed** logical round `N` (highest `incoming_global_round_{N}.pth`).
+2. Set `"resume_from_local_round": N` and `"resume_ckpt_dir"` → the run dir holding the cached weights.
+3. Resubmit. Round 0 reseeds (server reconstructs the round-`N` global, train-size weighted); round 1
+   = logical `N+1`; trajectory continues `N+1, N+2, …`.
+4. Repeat with `N` = the new last-completed round each time.
+
+Result: one contiguous `incoming_global_round_{0..M}.pth` on every node.
+
+### 2. Ditto real-world — replay, ON EACH NODE
+
+Data is siloed, so the replay runs **per node** on that node's local data + its own cached trajectory
+(no federation, no FedAvg recompute). Copy `ditto_sweep/replay_sweep.py` into each node's job
+environment (it imports the same `app/custom`) and run, with `--clients` = that one site:
 
 ```bash
-# 1) build the per-site crop caches once (skip if already built by the ditto sweeps)
-python ditto_sweep/launcher.py --base-job ../gmic_job --prepare-cache --gpu-pools "0,1,2"
+# on the UHCC node
+python replay_sweep.py --base-job <gmic_job_hpu> --clients UHCC \
+  --traj-dir <run>/incoming_global --traj-prefix UHCC \
+  --lambdas 0.05,0.1,0.5 --gpu 0 --out uhcc_replay.json
+# on the HPU node (Windows OK)        -> --clients HPU --traj-prefix HPU --out hpu_replay.json
+# on the RSNA node                    -> --clients RSNA-GCP --traj-prefix RSNA-GCP --out rsna_replay.json
+```
 
-# 2) one FedAvg run that caches the per-round global trajectory
+Run the **same** `--lambdas` (or the same module-wise grid: `--modulewise --anchor 0.1
+--global-values 0.1,0.5,1.0 --local-values 0.01,0.05,0.1 --fusion-values 0.01,0.05,0.1`) on every node
+so the configs align. Each node writes a small per-site summary JSON (just AUCs — no patient data).
+
+### 3. Combine + select (off the nodes)
+
+Gather the three summary JSONs and merge into the cross-site worst/mean-site table:
+
+```bash
+python replay_sweep.py --combine "uhcc_replay.json,hpu_replay.json,rsna_replay.json" \
+  --metric worst_site --out ditto_replay_combined.json
+```
+
+That prints the same sweep table as the interleaved launcher and picks the worst-site-best λ.
+
+**Sanity check:** each node's round-0 replay val AUC ≈ its pretrained baseline; the module-wise
+`g=l=f=0.1` baseline ≈ scalar λ=0.1.
+
+### Fallback: interleaved Ditto real-world (no replay)
+
+Fully wired (`"method": "ditto"`, `"ditto_lambda": L`) — but each λ is a **full federated run that
+recomputes FedAvg** and is subject to HPU crashes (resume via the same offset procedure). Use only if
+the per-node replay is impractical; it's N× the cost.
+
+---
+
+## Last-ditch: everything in the simulator (no HPU)
+
+If real-world can't finish in time, run the whole thing in the simulator on the DGX (all sites' data
+local) — same data/seed, so results are consistent, and HPU is out of the loop entirely:
+
+```bash
+# one FedAvg run that caches the trajectory
 python ditto_sweep/launcher.py --base-job ../gmic_job --fedavg --rounds 60 \
   --gpu-pools "0,1,2" --output-base /workspace/sim/fedavg --work-root /workspace/sim/fedavg_runs
-```
-
-This writes, per site, `…/fedavg/<site>/incoming_global/<site>_incoming_global_round_{0..59}.pth` —
-the start-of-round global each round (`round_t` = `w^{t-1}`; round 0 = the pretrained seed). The
-broadcast global is identical at every site, so **any one site's** cache is the trajectory.
-
-## Then: replay the Ditto sweep against that trajectory
-
-```bash
-# scalar λ
+# central replay (all sites on one box -> no --combine needed)
 python ditto_sweep/replay_sweep.py --base-job ../gmic_job \
   --traj-dir /workspace/sim/fedavg/fedavg/UHCC/incoming_global --traj-prefix UHCC \
-  --lambdas 0.05,0.1,0.5 --clients UHCC,HPU,RSNA-GCP --gpu 0 \
-  --out /workspace/sim/ditto_replay/sweep_summary.json
-
-# module-wise, anchored at the scalar best, global tethered up / heads freer
-python ditto_sweep/replay_sweep.py --base-job ../gmic_job \
-  --traj-dir /workspace/sim/fedavg/fedavg/UHCC/incoming_global --traj-prefix UHCC --modulewise \
-  --anchor 0.1 --global-values 0.1,0.5,1.0 --local-values 0.01,0.05,0.1 --fusion-values 0.01,0.05,0.1 \
-  --clients UHCC,HPU,RSNA-GCP --gpu 0 --out /workspace/sim/ditto_replay/mw_summary.json
+  --lambdas 0.05,0.1,0.5 --clients UHCC,HPU,RSNA-GCP --gpu 0 --out /workspace/sim/ditto_replay.json
 ```
-
-Each config takes seconds–minutes (one personal fit per site, no federation), versus a full FedAvg per
-λ in the interleaved launcher. Ranking is the same worst/mean-site val-AUC selection.
-
-**Sanity check after launch:** each site's round-0 replay val AUC should ≈ its pretrained baseline
-(`v` starts at the pretrained init, anchored to itself). And the all-anchor module-wise baseline
-(`g=l=f=0.1`) should track the scalar λ=0.1 replay.
-
-## If you DO run FedAvg real-world (gmic_job_hpu, with HPU): surviving nightly crashes
-
-Only needed if the paper requires the actual cross-site federated FedAvg (not the simulator). Round
-numbering is now resume-safe: every per-round artifact is stamped `current_round + resume_from_local_round`,
-so a resumed segment continues the logical numbering instead of overwriting round 0.
-
-Per crash:
-1. Find the last **completed** logical round `N` (highest `…_gmic_model_round_{N}.pth` / trajectory file).
-2. In `config_fed_client.json` set `"resume_from_local_round": N` (and `resume_ckpt_dir` → the run dir
-   holding those files). Keep `cache_incoming_global: true`.
-3. Resubmit the job. Round 0 reseeds (server reconstructs the round-`N` global from each site's cached
-   weights, train-size weighted); round 1 = logical `N+1`; trajectory files continue `N+1, N+2, …`.
-4. Repeat each crash with `resume_from_local_round` = the new last-completed logical round.
-
-The result is one contiguous `incoming_global_round_{0..M}.pth` trajectory across however many segments
-it took — directly usable by `replay_sweep.py`. (Gather one site's `incoming_global/` to the DGX,
-since the replay trains per-site `v` and needs the DGX's local site data.)
 
 ## Why replay == interleaved (and the one caveat)
 
-`test_ditto_replay_equivalence.py` proves the anchor mapping (`anchor[t]` = start-of-round global) and
-v-carried-forward reproduce interleaved Ditto **bit-for-bit** on fixed data. With the real balanced
-sampler, replay won't bit-match a live interleaved run (its global pass would have advanced the RNG
-first) — that's sampling noise, not bias, and is fine for λ selection on val AUC.
+`test_ditto_replay_equivalence.py` proves the anchor mapping and v-carried-forward reproduce
+interleaved Ditto **bit-for-bit** on fixed data. With the real balanced sampler, replay won't
+bit-match a live interleaved run (its global pass would have advanced the RNG first) — sampling noise,
+not bias, and fine for λ selection on val AUC.

@@ -52,8 +52,13 @@ import json
 import os
 import re
 import sys
+import tempfile
 
 import torch
+
+# Portable scratch dir for the executor's (unused-by-replay) output/log paths -- /tmp does not exist
+# on Windows (the HPU node), so derive from the OS temp dir.
+_SCRATCH = os.path.join(tempfile.gettempdir(), "ditto_replay_scratch")
 
 # Estimators/components live in the base job's app/custom; add it to the path.
 def _add_custom_to_path(base_job):
@@ -134,9 +139,9 @@ def build_site(base_job, args, site, device):
     a["gpus"] = device.split(":")[-1] if ":" in device else "0"
     a["disable_tensorboard"] = True
     # scratch output paths so we never touch the real run dirs (replay writes nothing here anyway)
-    a["output_dir"] = f"/tmp/ditto_replay_scratch/{{site}}"
-    a["tb_log_dir"] = f"/tmp/ditto_replay_scratch/tb/{{site}}"
-    a["log_file"] = f"/tmp/ditto_replay_scratch/{{site}}/replay.log"
+    a["output_dir"] = os.path.join(_SCRATCH, "{site}")
+    a["tb_log_dir"] = os.path.join(_SCRATCH, "tb", "{site}")
+    a["log_file"] = os.path.join(_SCRATCH, "{site}", "replay.log")
     ex = GMICFederatedExecutor(**a)
     ex._identity = site
     ex.initialize()
@@ -174,11 +179,56 @@ def aggregate(per_site):
     return {"worst_site": min(vals), "mean_site": sum(vals) / len(vals)}
 
 
+def print_report(results, clients, metric):
+    ranked = sorted(results, key=lambda x: (x["agg"].get(metric) if x["agg"].get(metric) is not None else -1),
+                    reverse=True)
+    wcfg = max(16, max((len(r["display"]) for r in results), default=8))
+    hdr = "  ".join(f"{c:>10}" for c in clients)
+    print("\n" + "=" * (wcfg + 26 + 12 * len(clients)))
+    print("DITTO REPLAY SWEEP RESULTS")
+    print("=" * (wcfg + 26 + 12 * len(clients)))
+    print(f"{'config':>{wcfg}}  {'worst_site':>10}  {'mean_site':>10}   {hdr}")
+    for r in results:
+        ws = "%.4f" % r["agg"]["worst_site"] if r["agg"]["worst_site"] is not None else "   NA"
+        ms = "%.4f" % r["agg"]["mean_site"] if r["agg"]["mean_site"] is not None else "   NA"
+        per = "  ".join(("%10.4f" % r["per_site"][c]) if r["per_site"].get(c) == r["per_site"].get(c)
+                        else f"{'NA':>10}" for c in clients)
+        star = "  <- BEST" if r is ranked[0] and r["agg"].get(metric) is not None else ""
+        print(f"{r['display']:>{wcfg}}  {ws:>10}  {ms:>10}   {per}{star}")
+    if ranked and ranked[0]["agg"].get(metric) is not None:
+        print(f"\nBEST ({metric}): {ranked[0]['display']}  {metric}={ranked[0]['agg'][metric]:.4f}")
+    print("=" * (wcfg + 26 + 12 * len(clients)) + "\n")
+
+
+def combine_summaries(paths, metric):
+    """Merge per-node replay summaries (REAL-WORLD path: each site ran on its own node) into one
+    cross-site table. Per config label, union the per_site maps across files, then recompute
+    worst/mean over all sites and select. Configs are matched by label, so run the SAME lambdas/
+    grid on every node."""
+    by_label = {}
+    clients = []
+    for p in paths:
+        with open(p) as f:
+            s = json.load(f)
+        for c in s.get("clients", []):
+            if c not in clients:
+                clients.append(c)
+        for r in s["results"]:
+            slot = by_label.setdefault(r["label"], {"label": r["label"], "display": r["display"], "per_site": {}})
+            slot["per_site"].update({k: v for k, v in r.get("per_site", {}).items()
+                                     if isinstance(v, (int, float))})
+    results = []
+    for slot in by_label.values():
+        results.append({**slot, "agg": aggregate(slot["per_site"])})
+    print_report(results, clients, metric)
+    return results, clients
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--base-job", required=True, help="job dir providing app/config + app/custom")
-    ap.add_argument("--traj-dir", required=True, help="dir with {prefix}_incoming_global_round_*.pth")
-    ap.add_argument("--traj-prefix", required=True, help="site prefix of the cached global trajectory")
+    ap.add_argument("--base-job", help="job dir providing app/config + app/custom (required unless --combine)")
+    ap.add_argument("--traj-dir", help="dir with {prefix}_incoming_global_round_*.pth (required unless --combine)")
+    ap.add_argument("--traj-prefix", help="site prefix of the cached global trajectory (required unless --combine)")
     ap.add_argument("--clients", default="UHCC,HPU,RSNA-GCP")
     ap.add_argument("--gpu", default="0")
     ap.add_argument("--rounds", type=int, default=0, help="replay rounds (0 = all cached rounds)")
@@ -191,8 +241,26 @@ def main():
     ap.add_argument("--fusion-values", default=None)
     ap.add_argument("--metric", default="worst_site", choices=["worst_site", "mean_site"])
     ap.add_argument("--out", default=None, help="write summary JSON here")
+    ap.add_argument("--combine", default=None,
+                    help="REAL-WORLD: comma-separated per-node summary JSONs (or a glob) to merge into "
+                         "one cross-site selection table. With this, no replay is run.")
     a = ap.parse_args()
 
+    # Real-world combine: each node ran replay for its own site; merge their summaries + select.
+    if a.combine:
+        paths = []
+        for tok in a.combine.split(","):
+            paths.extend(sorted(glob.glob(tok.strip())) if any(ch in tok for ch in "*?[") else [tok.strip()])
+        results, clients = combine_summaries([p for p in paths if p], a.metric)
+        if a.out:
+            os.makedirs(os.path.dirname(os.path.abspath(a.out)) or ".", exist_ok=True)
+            with open(a.out, "w") as f:
+                json.dump({"mode": "combined", "metric": a.metric, "clients": clients, "results": results}, f, indent=2)
+            print(f"[replay] combined summary -> {a.out}")
+        return
+
+    if not (a.base_job and a.traj_dir and a.traj_prefix):
+        ap.error("--base-job, --traj-dir, --traj-prefix are required (unless --combine)")
     _add_custom_to_path(a.base_job)
     args = load_client_args(a.base_job)
     clients = [c.strip() for c in a.clients.split(",") if c.strip()]
@@ -222,25 +290,7 @@ def main():
         agg = aggregate(per_site)
         results.append({**r, "per_site": per_site, "agg": agg})
 
-    # Report
-    ranked = sorted(results, key=lambda x: (x["agg"].get(a.metric) if x["agg"].get(a.metric) is not None else -1),
-                    reverse=True)
-    wcfg = max(16, max((len(r["display"]) for r in results), default=8))
-    hdr = "  ".join(f"{c:>10}" for c in clients)
-    print("\n" + "=" * (wcfg + 26 + 12 * len(clients)))
-    print("DITTO REPLAY SWEEP RESULTS")
-    print("=" * (wcfg + 26 + 12 * len(clients)))
-    print(f"{'config':>{wcfg}}  {'worst_site':>10}  {'mean_site':>10}   {hdr}")
-    for r in results:
-        ws = "%.4f" % r["agg"]["worst_site"] if r["agg"]["worst_site"] is not None else "   NA"
-        ms = "%.4f" % r["agg"]["mean_site"] if r["agg"]["mean_site"] is not None else "   NA"
-        per = "  ".join(("%10.4f" % r["per_site"][c]) if r["per_site"].get(c) == r["per_site"].get(c)
-                        else f"{'NA':>10}" for c in clients)
-        star = "  <- BEST" if r is ranked[0] and r["agg"].get(a.metric) is not None else ""
-        print(f"{r['display']:>{wcfg}}  {ws:>10}  {ms:>10}   {per}{star}")
-    if ranked and ranked[0]["agg"].get(a.metric) is not None:
-        print(f"\nBEST ({a.metric}): {ranked[0]['display']}  {a.metric}={ranked[0]['agg'][a.metric]:.4f}")
-    print("=" * (wcfg + 26 + 12 * len(clients)) + "\n")
+    print_report(results, clients, a.metric)
 
     if a.out:
         os.makedirs(os.path.dirname(os.path.abspath(a.out)) or ".", exist_ok=True)
