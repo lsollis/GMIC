@@ -16,9 +16,9 @@
           "optimizer_name": "adam",
 
           "data_path_map": {
-            "UHCC": "/workspace/data/gmic_df_site2.csv",
+            "UHCC": "/workspace/data/gmic_df_UHCC_full_20260604_113112.csv",
             "HPU": "/workspace/data/gmic_df_site2.csv",
-            "RSNA-GCP": "/workspace/data/gmic_df_site2.csv"
+            "RSNA-GCP": "/workspace/data/gmic_df_site1.csv"
           },
           "image_path": "/workspace/data/p7_pngs",
           "input_format": "csv",
@@ -29,7 +29,7 @@
           "val_split": 0.15,
           "test_split": 0.15,
           "random_seed": 42,
-          "output_dir": "/workspace/data/processed/fedprox_3client_resumed",
+          "output_dir": "/workspace/data/processed/fedprox_3client_fixedinit_20260609",
           "preprocess_cache_dir": "/workspace/data/processed/fedprox_3client",
           "num_processes": 4,
 
@@ -51,7 +51,7 @@
 
           "train_log_batch_interval": 1,
           "log_lr_each_epoch": true,
-          "tb_log_dir": "/workspace/tb_logs_fedprox_3client_resumed",
+          "tb_log_dir": "/workspace/tb_logs_fedprox_3client_fixedinit_20260609",
           "disable_tensorboard": false,
           "per_file_logging": true,
           "tolerant_missing_metadata": false,
@@ -82,10 +82,10 @@
           "freeze_backbone_epochs": 2,
           "cache_global_trajectory": true,
           "cache_incoming_global": true,
-          "resume_from_local_round": 32,
+          "resume_from_local_round": -1,
           "resume_ckpt_dir": "/workspace/data/processed/fedprox_3client",
 
-          "log_file": "/workspace/data/processed/fedprox_3client_resumed/executor.log",
+          "log_file": "/workspace/data/processed/fedprox_3client_fixedinit_20260609/executor.log",
           "file_integrity_check": true,
           "fail_on_integrity_error": false,
 

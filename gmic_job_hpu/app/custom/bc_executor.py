@@ -577,10 +577,15 @@ class GMICFederatedExecutor(Executor):
             )
             self._logger.info("[EXEC] Pretrained init from %s: %s", ckpt, self._pretrained_report)
         else:
-            self._logger.warning(
-                "[EXEC][WARN] pretrained checkpoint not found at '%s' — model starts from "
-                "random init and the round-0 baseline will NOT be meaningful. "
-                "Set pretrained_weights_path (or model_path) on the restricted machine.", ckpt
+            # FAIL LOUD: this executor always fine-tunes from the released GMIC checkpoint.
+            # A missing checkpoint previously fell back to RANDOM init and ran silently --
+            # which contaminated a federated run when one client's sample_model_5.p was absent
+            # (its random-derived update poisoned the aggregate). Refuse to start instead.
+            raise FileNotFoundError(
+                f"[EXEC] pretrained checkpoint required but not found at {ckpt!r}. This run is "
+                f"supposed to init from pretrained weights; refusing to start from random init "
+                f"(it silently contaminates the aggregate and the round-0 baseline). Place the "
+                f"checkpoint at this path on THIS client, or set pretrained_weights_path/model_path."
             )
 
         # 6. Freezing
