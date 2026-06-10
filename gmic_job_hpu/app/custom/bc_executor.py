@@ -1662,7 +1662,16 @@ class GMICFederatedExecutor(Executor):
                 outputs = v(inputs)
                 loss = self._compute_task_loss(outputs, targets)
                 loss = loss + proximal_penalty(v, self._global_ref, lam)
+                # Stability guard: the personal pass runs in fp32 with no AMP GradScaler, so unlike
+                # the main loop it has no built-in inf/nan-skip. The personal model v PERSISTS across
+                # rounds, so a single non-finite step would poison it for the whole run (-> NaN val
+                # AUC -> reported as 0.0). Skip non-finite losses and clip grads so extreme lambdas
+                # can't silently zero a site.
+                if not torch.isfinite(loss):
+                    self.log_warning(fl_ctx, f"[ditto] non-finite personal loss (epoch {epoch + 1}); skipping step")
+                    continue
                 loss.backward()
+                torch.nn.utils.clip_grad_norm_(v.parameters(), max_norm=5.0)
                 opt.step()
                 n_batches += 1
             self.log_info(fl_ctx, f"[ditto] personal epoch {epoch + 1}/{self.epochs} done ({n_batches} batches)")

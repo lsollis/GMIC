@@ -20,21 +20,31 @@ Key design
 This script can't be exercised on the Windows clone (no GPUs / real data); run it on the
 DGX. It only shells out to `nvflare simulator` and reads JSON the executor writes.
 
-Example
--------
-  python launcher.py \
-    --base-job ../gmic_job \
-    --lambdas 0.01,0.05,0.1,0.5,1.0,2.0 \
-    --rounds 20 \
-    --gpu-pools "1,2,3;4,5,6" \
-    --output-base /workspace/sim/ditto \
-    --work-root  /workspace/sim/ditto_runs
+Two modes
+---------
+- scalar (default): one ditto_lambda per run (method=ditto), ranked by worst-site val AUC.
+- module-wise (--modulewise): method=ditto_modulewise with per-group lambdas {global,local,fusion}.
+  A one-at-a-time sweep ANCHORED at --anchor (default 0.1, the scalar sweet spot): a baseline with
+  all three groups at the anchor, then each group varied over --group-values while the others hold.
+
+Examples
+--------
+  # scalar lambda sweep
+  python launcher.py --base-job ../gmic_job --lambdas 0.01,0.05,0.1,0.5,1.0,2.0 \
+    --rounds 20 --gpu-pools "1,2,3;4,5,6" \
+    --output-base /workspace/sim/ditto --work-root /workspace/sim/ditto_runs
+
+  # module-wise sweep anchored at the scalar best (0.1)
+  python launcher.py --base-job ../gmic_job --modulewise --anchor 0.1 \
+    --group-values 0.05,0.1,0.5,1.0 --rounds 20 --gpu-pools "1,2,3;4,5,6" \
+    --output-base /workspace/sim/ditto_mw --work-root /workspace/sim/ditto_mw_runs
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import shutil
 import subprocess
@@ -82,16 +92,16 @@ def _base_cfg_paths(base_job):
     )
 
 
-def render_job(lam, rounds, base_job, work_root, output_base, clients):
-    """Materialize a runnable simulator job dir for one lambda.
+def render_job(label, arg_overrides, rounds, base_job, work_root, output_base, clients):
+    """Materialize a runnable simulator job dir for one run, identified by `label`.
 
     Uses base_job's OWN config as the single source (its app/config + meta.json) and copies
-    its app/custom code verbatim. Per-lambda dynamic fields (ditto_lambda + output/tb/log
-    paths + num_rounds) are overridden here; {site} is left intact for the executor to
-    substitute per client. Returns the job dir path.
+    its app/custom code verbatim. `arg_overrides` (e.g. {method, ditto_lambda} for scalar Ditto,
+    or {method, lambda_global, lambda_local, lambda_fusion} for module-wise) plus the output/tb/log
+    paths + num_rounds are overridden here; {site} is left intact for the executor to substitute per
+    client. Outputs land under {output_base}/{label}/{site}. Returns the job dir path.
     """
-    ls = _lam_str(lam)
-    job_dir = os.path.join(work_root, f"job_l{ls}")
+    job_dir = os.path.join(work_root, f"job_{label}")
     app_dir = os.path.join(job_dir, "app")
     cfg_dir = os.path.join(app_dir, "config")
     os.makedirs(cfg_dir, exist_ok=True)
@@ -112,12 +122,11 @@ def render_job(lam, rounds, base_job, work_root, output_base, clients):
 
     base_client, base_server, base_meta = _base_cfg_paths(base_job)
 
-    # 2) client config: base_job's config + per-lambda overrides ({site} preserved)
+    # 2) client config: base_job's config + this run's overrides ({site} preserved)
     client_cfg = _load_json(base_client)
     args = client_cfg["executors"][0]["executor"]["args"]
-    args["method"] = "ditto"
-    args["ditto_lambda"] = float(lam)
-    run_root = f"{output_base}/l{ls}"
+    args.update(arg_overrides)
+    run_root = f"{output_base}/{label}"
     args["output_dir"] = f"{run_root}/{{site}}"
     args["tb_log_dir"] = f"{run_root}/tb/{{site}}"
     args["log_file"] = f"{run_root}/{{site}}/executor.log"
@@ -137,6 +146,46 @@ def render_job(lam, rounds, base_job, work_root, output_base, clients):
     _dump_json(os.path.join(job_dir, "meta.json"), meta)
 
     return job_dir
+
+
+def build_runs(a):
+    """Build the list of runs to sweep: each is {"label","display","overrides"}.
+
+    Scalar (default): one run per --lambdas value, method=ditto.
+    Module-wise (--modulewise): a one-at-a-time sweep ANCHORED at --anchor (default 0.1, the global
+    Ditto sweet spot). The baseline sets all three groups to the anchor (== scalar Ditto at the
+    anchor); then each group {global, local, fusion} is varied over --group-values in turn while the
+    other two stay at the anchor. method=ditto_modulewise.
+    """
+    if not a.modulewise:
+        runs = []
+        for lam in [float(x) for x in a.lambdas.split(",") if x.strip()]:
+            ls = _lam_str(lam)
+            runs.append({"label": f"l{ls}", "display": ls,
+                         "overrides": {"method": "ditto", "ditto_lambda": lam}})
+        return runs
+
+    anchor = float(a.anchor)
+    values = [float(x) for x in a.group_values.split(",") if x.strip()]
+    groups = ["global", "local", "fusion"]
+
+    def mk(g, l, f):
+        label = f"mw_g{_lam_str(g)}_l{_lam_str(l)}_f{_lam_str(f)}"
+        return {"label": label, "display": f"g={_lam_str(g)} l={_lam_str(l)} f={_lam_str(f)}",
+                "overrides": {"method": "ditto_modulewise",
+                              "lambda_global": g, "lambda_local": l, "lambda_fusion": f}}
+
+    seen, runs = set(), []
+    base = mk(anchor, anchor, anchor)
+    runs.append(base); seen.add(base["label"])
+    for gi in groups:
+        for v in values:
+            trip = {"global": anchor, "local": anchor, "fusion": anchor}
+            trip[gi] = v
+            r = mk(trip["global"], trip["local"], trip["fusion"])
+            if r["label"] not in seen:
+                runs.append(r); seen.add(r["label"])
+    return runs
 
 
 def cache_paths(base_job, clients):
@@ -178,16 +227,17 @@ def launch(job_dir, workspace, clients, gpus, threads, log_path):
 
 
 # --------------------------------------------------------------------------- metrics
-def collect_lambda_metrics(output_base, lam, clients):
-    """Read each client's best personal-model val AUC for one lambda run.
+def collect_metrics(output_base, label, clients):
+    """Read each client's best personal-model val AUC for one run (subdir {output_base}/{label}).
 
-    Looks for {output_base}/l{ls}/{site}/{site}_best_val_overall_gmic_metrics.json, falling
-    back to {site}_final_results.json. Returns {site: auc_or_None}.
+    Looks for {site}_best_val_overall_gmic_metrics.json, falling back to {site}_final_results.json.
+    A non-finite or <= 0 value is a SENTINEL (the personal model never produced a valid val AUC, so
+    best_metrics stayed at its 0.0 default), NOT a real score -- it is reported as None ("NA") so it
+    cannot masquerade as a catastrophic 0.0 and pollute worst_site/mean_site. Returns {site: auc_or_None}.
     """
-    ls = _lam_str(lam)
     out = {}
     for c in clients:
-        site_dir = os.path.join(output_base, f"l{ls}", c)
+        site_dir = os.path.join(output_base, label, c)
         auc = None
         primary = os.path.join(site_dir, f"{c}_best_val_overall_gmic_metrics.json")
         if os.path.isfile(primary):
@@ -205,7 +255,8 @@ def collect_lambda_metrics(output_base, lam, clients):
                            or (m.get("best_metrics") or {}).get("val_auc"))
                 except Exception:
                     auc = None
-        out[c] = float(auc) if isinstance(auc, (int, float)) else None
+        ok = isinstance(auc, (int, float)) and math.isfinite(float(auc)) and float(auc) > 0.0
+        out[c] = float(auc) if ok else None
     return out
 
 
@@ -218,12 +269,14 @@ def aggregate(per_site):
 
 
 # --------------------------------------------------------------------------- reporting
-def print_report(results, clients, metric):
+def print_report(results, clients, metric, title="DITTO LAMBDA SWEEP RESULTS"):
     sites_hdr = "  ".join(f"{c:>10}" for c in clients)
-    print("\n" + "=" * (34 + 12 * len(clients)))
-    print("DITTO LAMBDA SWEEP RESULTS")
-    print("=" * (34 + 12 * len(clients)))
-    print(f"{'lambda':>8}  {'worst_site':>10}  {'mean_site':>10}   {sites_hdr}")
+    wcfg = max(16, max((len(r["display"]) for r in results), default=8))
+    width = wcfg + 26 + 12 * len(clients)
+    print("\n" + "=" * width)
+    print(title)
+    print("=" * width)
+    print(f"{'config':>{wcfg}}  {'worst_site':>10}  {'mean_site':>10}   {sites_hdr}")
     ranked = sorted(
         results,
         key=lambda r: (r["agg"].get(metric) if r["agg"].get(metric) is not None else -1),
@@ -238,31 +291,38 @@ def print_report(results, clients, metric):
             else f"{'NA':>10}" for c in clients
         )
         star = "  <- BEST" if (ranked and r is ranked[0] and agg.get(metric) is not None) else ""
-        print(f"{_lam_str(r['lambda']):>8}  {ws:>10}  {ms:>10}   {per}{star}")
+        print(f"{r['display']:>{wcfg}}  {ws:>10}  {ms:>10}   {per}{star}")
     if ranked and ranked[0]["agg"].get(metric) is not None:
         best = ranked[0]
-        print(f"\nBEST ({metric}): lambda={_lam_str(best['lambda'])}  "
-              f"{metric}={best['agg'][metric]:.4f}")
+        print(f"\nBEST ({metric}): {best['display']}  {metric}={best['agg'][metric]:.4f}")
     else:
-        print("\nNo lambda produced a usable metric (check run logs).")
-    print("=" * (34 + 12 * len(clients)) + "\n")
+        print("\nNo config produced a usable metric (check run logs).")
+    print("=" * width + "\n")
 
 
 # --------------------------------------------------------------------------- main
 def main():
-    ap = argparse.ArgumentParser(description="Ditto lambda sweep via NVFLARE simulator.")
+    ap = argparse.ArgumentParser(description="Ditto (scalar or module-wise) lambda sweep via the NVFLARE simulator.")
     ap.add_argument("--base-job", required=True,
                     help="ditto job dir providing app/config + app/custom (e.g. ../gmic_job). "
-                         "Its config is the single source; the launcher overrides only "
-                         "ditto_lambda, num_rounds, and the output/tb/log paths per lambda.")
-    ap.add_argument("--lambdas", default="0.01,0.05,0.1,0.5,1.0,2.0")
+                         "Its config is the single source; the launcher overrides only the method + "
+                         "lambda field(s), num_rounds, and the output/tb/log paths per run.")
+    ap.add_argument("--lambdas", default="0.01,0.05,0.1,0.5,1.0,2.0",
+                    help="scalar Ditto: comma-separated ditto_lambda values")
+    ap.add_argument("--modulewise", action="store_true",
+                    help="sweep method=ditto_modulewise per-group lambdas (one-at-a-time, anchored)")
+    ap.add_argument("--anchor", type=float, default=0.1,
+                    help="module-wise anchor: the value all three groups hold at (default 0.1, the "
+                         "global Ditto sweet spot); each group is then varied over --group-values")
+    ap.add_argument("--group-values", default="0.05,0.1,0.5,1.0",
+                    help="module-wise: values to try for each group {global,local,fusion} in turn")
     ap.add_argument("--rounds", type=int, default=20)
     ap.add_argument("--gpu-pools", default="1,2,3;4,5,6",
                     help="';'-separated GPU triples; one concurrent run per pool")
     ap.add_argument("--clients", default="UHCC,HPU,RSNA-GCP")
     ap.add_argument("--threads", type=int, default=3, help="simulator -t (clients run concurrently)")
     ap.add_argument("--output-base", default="/workspace/sim/ditto",
-                    help="output_dir base; executor appends /l<lam>/<site>")
+                    help="output_dir base; executor appends /<run-label>/<site>")
     ap.add_argument("--work-root", default="/workspace/sim/ditto_runs",
                     help="where rendered job dirs + simulator workspaces + run logs go")
     ap.add_argument("--metric", default="worst_site", choices=["worst_site", "mean_site"])
@@ -274,100 +334,98 @@ def main():
     a = ap.parse_args()
 
     clients = [c.strip() for c in a.clients.split(",") if c.strip()]
-    lambdas = [float(x) for x in a.lambdas.split(",") if x.strip()]
     pools = [[g.strip() for g in pool.split(",") if g.strip()]
              for pool in a.gpu_pools.split(";") if pool.strip()]
     os.makedirs(a.work_root, exist_ok=True)
 
-    print(f"[sweep] lambdas={lambdas} rounds={a.rounds} clients={clients}")
+    runs = build_runs(a)
+    mode = "module-wise" if a.modulewise else "scalar"
+    title = "DITTO MODULE-WISE SWEEP RESULTS" if a.modulewise else "DITTO LAMBDA SWEEP RESULTS"
+    print(f"[sweep] mode={mode} runs={len(runs)} rounds={a.rounds} clients={clients}")
+    if a.modulewise:
+        print(f"[sweep] anchor={_lam_str(a.anchor)} group_values={a.group_values}")
     print(f"[sweep] gpu_pools={pools} (=> {len(pools)} concurrent runs)  metric={a.metric}")
     print(f"[sweep] output_base={a.output_base}  work_root={a.work_root}")
 
     # Pre-render all jobs (cheap; also validates base_job config early)
-    jobs = {}
-    for lam in lambdas:
-        jobs[lam] = render_job(lam, a.rounds, a.base_job, a.work_root, a.output_base, clients)
-        print(f"[render] lambda={_lam_str(lam)} -> {jobs[lam]}")
+    for r in runs:
+        r["job_dir"] = render_job(r["label"], r["overrides"], a.rounds, a.base_job,
+                                  a.work_root, a.output_base, clients)
+        print(f"[render] {r['display']} -> {r['job_dir']}")
 
     if a.dry_run:
         print("[dry-run] jobs rendered; not launching.")
-        for lam in lambdas:
-            ws = os.path.join(a.work_root, f"ws_l{_lam_str(lam)}")
-            print("  would run:", " ".join(simulator_cmd(jobs[lam], ws, clients, pools[0], a.threads)))
+        for r in runs:
+            ws = os.path.join(a.work_root, f"ws_{r['label']}")
+            print("  would run:", " ".join(simulator_cmd(r["job_dir"], ws, clients, pools[0], a.threads)))
         return
 
-    # --prepare-cache: build the per-site crop caches once via a 1-round solo run, then exit.
-    if a.prepare_cache:
-        print(f"[prepare-cache] building per-site crop caches via a 1-round solo run "
-              f"(lambda={_lam_str(lambdas[0])}, gpus={pools[0]})")
-        cache_job = render_job(lambdas[0], 1, a.base_job,
-                               a.work_root, a.output_base + "_cacheprep", clients)
-        ws = os.path.join(a.work_root, "ws_cacheprep")
-        proc, lf = launch(cache_job, ws, clients, pools[0], a.threads,
-                          os.path.join(a.work_root, "cacheprep.log"))
-        rc = proc.wait()
-        lf.close()
-        ok = caches_ready(a.base_job, clients)
-        print(f"[prepare-cache] done rc={rc}; caches_ready={ok}")
-        if not ok:
-            print("[prepare-cache] WARNING: caches still not detected; check cacheprep.log.")
-        return
-
-    # Build the shared per-site crop caches ONCE (1-round solo run) before any parallel runs,
-    # if they're missing -- preprocessing the (train/val/test SPLITS of the) data is fine; what
-    # the sweep must never do is use TEST data for selection (it doesn't: lambda is ranked by
-    # VAL AUC, see collect_lambda_metrics / the server IntimeModelSelector). Solo-first avoids
-    # two cold parallel runs racing on the same cache. Skipped when caches already exist.
-    if not caches_ready(a.base_job, clients):
-        print(f"[cache] per-site caches missing -> building once (1-round solo run, gpus={pools[0]})")
-        warm_job = render_job(lambdas[0], 1, a.base_job,
+    # Build the shared per-site crop caches ONCE (1-round solo run) before any parallel runs, if
+    # they're missing -- preprocessing the (train/val/test SPLITS of the) data is fine; what the
+    # sweep must never do is use TEST data for selection (it doesn't: ranked by VAL AUC, see
+    # collect_metrics / the server IntimeModelSelector). Solo-first avoids two cold parallel runs
+    # racing on the same cache. Skipped when caches already exist.
+    def _build_cache():
+        warm_job = render_job("cacheprep", runs[0]["overrides"], 1, a.base_job,
                               a.work_root, a.output_base + "_cacheprep", clients)
         ws = os.path.join(a.work_root, "ws_cacheprep")
         proc, lf = launch(warm_job, ws, clients, pools[0], a.threads,
                           os.path.join(a.work_root, "cacheprep.log"))
         rc = proc.wait()
         lf.close()
+        return rc
+
+    if a.prepare_cache:
+        print(f"[prepare-cache] building per-site crop caches via a 1-round solo run (gpus={pools[0]})")
+        rc = _build_cache()
+        ok = caches_ready(a.base_job, clients)
+        print(f"[prepare-cache] done rc={rc}; caches_ready={ok}")
+        if not ok:
+            print("[prepare-cache] WARNING: caches still not detected; check cacheprep.log.")
+        return
+
+    if not caches_ready(a.base_job, clients):
+        print(f"[cache] per-site caches missing -> building once (1-round solo run, gpus={pools[0]})")
+        rc = _build_cache()
         print(f"[cache] build done rc={rc}; caches_ready={caches_ready(a.base_job, clients)}")
     else:
         print("[cache] per-site caches present -> reusing (no preprocessing).")
 
     # Schedule the sweep across GPU pools (one running job per pool).
-    pending = list(lambdas)
-    running = {}  # pool_idx -> (lam, proc, lf, start_ts)
-    print(f"[run] starting sweep of {len(pending)} lambdas across {len(pools)} pools")
+    pending = list(runs)
+    running = {}  # pool_idx -> (run, proc, lf, start_ts)
+    print(f"[run] starting sweep of {len(pending)} runs across {len(pools)} pools")
     while pending or running:
-        # fill free pools
         for pi in range(len(pools)):
             if pi not in running and pending:
-                lam = pending.pop(0)
-                ws = os.path.join(a.work_root, f"ws_l{_lam_str(lam)}")
-                log_path = os.path.join(a.work_root, f"run_l{_lam_str(lam)}.log")
-                proc, lf = launch(jobs[lam], ws, clients, pools[pi], a.threads, log_path)
-                running[pi] = (lam, proc, lf, time.time())
-                print(f"[run] launched lambda={_lam_str(lam)} on pool{pi}={pools[pi]} -> {log_path}")
-        # reap finished
+                r = pending.pop(0)
+                ws = os.path.join(a.work_root, f"ws_{r['label']}")
+                log_path = os.path.join(a.work_root, f"run_{r['label']}.log")
+                proc, lf = launch(r["job_dir"], ws, clients, pools[pi], a.threads, log_path)
+                running[pi] = (r, proc, lf, time.time())
+                print(f"[run] launched {r['display']} on pool{pi}={pools[pi]} -> {log_path}")
         for pi in list(running.keys()):
-            lam, proc, lf, t0 = running[pi]
+            r, proc, lf, t0 = running[pi]
             rc = proc.poll()
             if rc is not None:
                 lf.close()
                 dt = time.time() - t0
-                print(f"[run] lambda={_lam_str(lam)} on pool{pi} finished rc={rc} in {dt/60:.1f} min")
+                print(f"[run] {r['display']} on pool{pi} finished rc={rc} in {dt/60:.1f} min")
                 del running[pi]
         if running:
             time.sleep(a.poll)
 
     # Collect + report
-    results = []
-    for lam in lambdas:
-        per_site = collect_lambda_metrics(a.output_base, lam, clients)
-        results.append({"lambda": lam, "per_site": per_site, "agg": aggregate(per_site)})
-    print_report(results, clients, a.metric)
+    for r in runs:
+        r["per_site"] = collect_metrics(a.output_base, r["label"], clients)
+        r["agg"] = aggregate(r["per_site"])
+    print_report(runs, clients, a.metric, title=title)
 
     summary_path = os.path.join(a.work_root, "sweep_summary.json")
     _dump_json(summary_path, {
-        "metric": a.metric, "rounds": a.rounds, "clients": clients,
-        "results": results,
+        "mode": mode, "metric": a.metric, "rounds": a.rounds, "clients": clients,
+        "anchor": a.anchor if a.modulewise else None,
+        "results": [{k: r[k] for k in ("label", "display", "overrides", "per_site", "agg")} for r in runs],
     })
     print(f"[sweep] summary written -> {summary_path}")
 
