@@ -16,9 +16,9 @@
           "optimizer_name": "adam",
 
           "data_path_map": {
-            "UHCC": "/workspace/data/gmic_df_UHCC_full_20260604_113112.csv",
-            "HPU": "/workspace/data/gmic_df_site2.csv",
-            "RSNA-GCP": "/workspace/data/gmic_df_site1.csv"
+            "UHCC": "/workspace/data/archived_data_csvs/gmic_df_UHCC_full_20260604_113112.csv",
+            "HPU": "/workspace/data/archived_data_csvs/gmic_df_site2.csv",
+            "RSNA-GCP": "/workspace/data/archived_data_csvs/gmic_df_site1.csv"
           },
           "image_path": "/workspace/data",
           "input_format": "csv",
@@ -32,7 +32,7 @@
 
           "output_dir": "/workspace/sim/ditto/l0.1/{site}",
           "preprocess_cache_dir_map": {
-            "UHCC": "/workspace/data/processed/ditto_sim_cache/UHCC",
+            "UHCC": "/workspace/data/processed/fedprox_3_client",
             "HPU": "/workspace/data/processed/ditto_sim_cache/HPU",
             "RSNA-GCP": "/workspace/data/processed/ditto_sim_cache/RSNA-GCP"
           },
