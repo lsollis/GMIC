@@ -220,6 +220,7 @@ class GMICFederatedExecutor(Executor):
             resume_from_local_round: int = -1,    # resumed-job round 0: submit cached round-N weights untrained
             resume_ckpt_dir: str | None = None,   # dir holding {client}_gmic_model_round_{N}.pth (default: results_dir)
             salvage_eval_rounds: list | None = None,  # test-only salvage: reconstruct+eval these rounds' globals (no training)
+            salvage_ckpt_dir: str | None = None,  # dir holding global_trajectory/ + round ckpts for salvage (default: results_dir)
         ):
             """GMIC Federated Executor (feature parity with local trainer)."""
             super().__init__()
@@ -357,6 +358,7 @@ class GMICFederatedExecutor(Executor):
             self.resume_from_local_round = int(resume_from_local_round)
             self.resume_ckpt_dir = resume_ckpt_dir
             self.salvage_eval_rounds = [int(r) for r in salvage_eval_rounds] if salvage_eval_rounds else []
+            self.salvage_ckpt_dir = salvage_ckpt_dir
             # Guardrail: balanced sampler + a large pos_weight double-counts the imbalance
             # correction (sampler evens the batch mix AND the loss up-weights positives).
             if self.use_balanced_sampler and self.pos_weight > 2.0:
@@ -1001,7 +1003,7 @@ class GMICFederatedExecutor(Executor):
         """Path to this client's SENT weights for a round: prefer the authoritative
         global_trajectory file, fall back to the deployed local checkpoint (equal at epochs=1)."""
         client = fl_ctx.get_identity_name()
-        base = self.resume_ckpt_dir or self.results_dir
+        base = self.salvage_ckpt_dir or self.results_dir
         for c in (os.path.join(base, "global_trajectory", f"{client}_global_round_{int(round_n)}.pth"),
                   os.path.join(base, f"{client}_gmic_model_round_{int(round_n)}.pth")):
             if os.path.exists(c):
@@ -1031,34 +1033,53 @@ class GMICFederatedExecutor(Executor):
         deployed_val_auc[N] -- a built-in end-to-end pipeline check. Server config: a normal FedAvg
         controller with num_rounds = len(salvage_eval_rounds) + 1.
         """
+        from salvage_metrics import breast_aggregate, endpoint_metrics, format_endpoint
+
         current_round = int(shareable.get_header(AppConstants.CURRENT_ROUND, 0))
         client = fl_ctx.get_identity_name()
         rounds = self.salvage_eval_rounds
         K = len(rounds)
 
         def _eval_and_dump(model, src_round, method_tag):
+            """Dump val+test preds, compute + LOG this site's breast-level stats, and return the
+            breast-level {split: (probs, labels)} so incoming_global can be pooled on the server."""
+            breasts = {}
             for split in ("val", "test"):
                 if not self.data_loader.get_data_for_split(split):
                     continue
-                core = self._evaluate_model(fl_ctx, split=split, model=model)
-                self.log_info(
-                    fl_ctx,
-                    f"[salvage] site={client} {method_tag} round={int(src_round)} "
-                    f"{split}_auc={core['auc']:.4f} n={core['samples']}"
-                )
                 try:
-                    self._dump_predictions(fl_ctx, split=split, model=model,
-                                           round_idx=int(src_round), method_tag=method_tag,
-                                           save_saliency=False)
+                    rows = self._dump_predictions(fl_ctx, split=split, model=model,
+                                                  round_idx=int(src_round), method_tag=method_tag,
+                                                  save_saliency=False)
                 except Exception as e:
                     self.log_warning(fl_ctx, f"[salvage] {method_tag} preds ({split}) failed: {e}")
+                    continue
+                if rows:
+                    bp, by = breast_aggregate([r["site_id"] for r in rows], [r["exam_id"] for r in rows],
+                                              [r["view"] for r in rows], [r["prob_malignant"] for r in rows],
+                                              [r["label"] for r in rows])
+                    breasts[split] = (bp, by)
+            if "val" in breasts and "test" in breasts:
+                m = endpoint_metrics(breasts["val"][0], breasts["val"][1],
+                                     breasts["test"][0], breasts["test"][1])
+                # Per-site paper row, logged at THIS node (covers sites with no file access via logs).
+                self.log_info(fl_ctx, f"[salvage-stats] {method_tag} src_round={int(src_round)} "
+                                      + format_endpoint(client, m))
+            return breasts
 
         # (1) Evaluate the reconstructed global broadcast this round (aggregate of last submission).
+        pooled_payload = None
         if current_round >= 1 and incoming is not None:
             src = int(rounds[current_round - 1])
             self._underlying.load_state_dict(self._ensure_torch_state(incoming, fl_ctx), strict=False)
             self.log_info(fl_ctx, f"[salvage] evaluating reconstructed global (from round-{src} contributions)")
-            _eval_and_dump(self.model, src, "incoming_global")
+            gb = _eval_and_dump(self.model, src, "incoming_global")
+            # Ship this site's breast-level (prob,label) for the SHARED global to the server so it can
+            # compute the POOLED AUC+CI (the one endpoint that needs cross-site fusion). De-identified
+            # scores+labels only -- no images, no IDs. The server aggregator logs the pooled result.
+            pooled_payload = {"src_round": src,
+                              "splits": {s: {"p": [float(x) for x in gb[s][0]],
+                                             "y": [int(x) for x in gb[s][1]]} for s in gb}}
 
         # Per-site weight = train-set size from the freshly preprocessed (cached) data.
         try:
@@ -1096,6 +1117,14 @@ class GMICFederatedExecutor(Executor):
             params=updated_weights, params_type=ParamsType.FULL, metrics=metrics, meta=model_meta
         )
         reply = FLModelUtils.to_shareable(fl_model_out)
+        # Header channel for the server-side pooled stats (read by SalvagePooledAggregator).
+        # JSON string so it survives serialization regardless of FOBS config; absent on the
+        # trailing round / sites with no data -> server simply skips pooling that round.
+        if pooled_payload is not None:
+            try:
+                reply.set_header("salvage_pooled_preds", json.dumps(pooled_payload))
+            except Exception as e:
+                self.log_warning(fl_ctx, f"[salvage] could not attach pooled preds: {e}")
         reply.set_return_code(ReturnCode.OK)
         return reply
 
@@ -1746,6 +1775,7 @@ class GMICFederatedExecutor(Executor):
                 split=str(split), round=int(round_idx),
             )
             self.log_info(fl_ctx, f"[saliency] wrote {len(sal_maps)} maps -> {sal_out}")
+        return rows
 
 
     def _save_global_round(self, fl_ctx: FLContext, round_idx, state_dict):
