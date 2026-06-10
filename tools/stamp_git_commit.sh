@@ -18,7 +18,7 @@ DIRTY=""
 git -C "$ROOT" diff --quiet || DIRTY="-dirty"
 STAMP="${HASH}${DIRTY}"
 
-for d in gmic_job gmic_job_hpu gmic_job_lr3e6; do
+for d in gmic_job gmic_job_hpu; do
   cdir="$ROOT/$d/app/custom"
   if [ -d "$cdir" ]; then
     echo "$STAMP" > "$cdir/GIT_COMMIT"

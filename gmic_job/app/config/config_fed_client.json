@@ -87,7 +87,7 @@
           "freeze_backbone_epochs": 2,
           "resume_from_local_round": -1,
           "cache_global_trajectory": false,
-          "cache_incoming_global": false,
+          "cache_incoming_global": true,
 
           "log_file": "/workspace/sim/ditto/l0.1/{site}/executor.log",
           "file_integrity_check": true,

@@ -216,7 +216,7 @@ class GMICFederatedExecutor(Executor):
             use_augmentation: bool = False,       # train-only conservative augmentation
             augmentation: dict | None = None,     # {horizontal_flip,max_rotation_deg,intensity_jitter}
             cache_global_trajectory: bool = False,  # persist per-round SENT global w^t for Ditto replay
-            cache_incoming_global: bool = False,  # persist the RECEIVED server aggregate each round (crash recovery)
+            cache_incoming_global: bool = False,  # per round: save RECEIVED aggregate (all rounds) + eval val/test + dump preds
             resume_from_local_round: int = -1,    # resumed-job round 0: submit cached round-N weights untrained
             resume_ckpt_dir: str | None = None,   # dir holding {client}_gmic_model_round_{N}.pth (default: results_dir)
         ):
@@ -301,6 +301,10 @@ class GMICFederatedExecutor(Executor):
             self.training_history = []
             self.validation_history = []
             self.test_history = []
+            # Per-round metrics for the RECEIVED global model (server aggregate), evaluated
+            # on val+test BEFORE local training. Lets the best global be picked offline by
+            # val AUC with test already on hand. Populated when cache_incoming_global=True.
+            self.incoming_global_history = []
             self.gmic_parameters_cfg = gmic_parameters or {}
             self.loss_name = loss
             self.optimizer_cfg = optimizer or {"name": "adam", "weight_decay": self.weight_decay}
@@ -803,6 +807,14 @@ class GMICFederatedExecutor(Executor):
                     self._save_incoming_global(fl_ctx, current_round, incoming)
                 except Exception as e:
                     self.log_warning(fl_ctx, f"[recv-global] save failed for round {current_round}: {e}")
+                # Per-round eval + prediction dump on the received global (self.model right
+                # after _consume_global, i.e. the aggregate as this site consumes it). Done
+                # here, BEFORE training mutates the weights, so best-global selection can be
+                # done offline by val AUC with test metrics + preds already on disk.
+                try:
+                    self._track_incoming_global(fl_ctx, current_round)
+                except Exception as e:
+                    self.log_warning(fl_ctx, f"[incoming-global] eval failed for round {current_round}: {e}")
 
             # === NUCLEAR OPTION: FORCE RANDOM INIT FOR THIS RUN ===
             # self._reset_model_weights()
@@ -1498,9 +1510,62 @@ class GMICFederatedExecutor(Executor):
                                    round_idx=0, method_tag="pretrained_baseline")
 
 
-    def _dump_predictions(self, fl_ctx: FLContext, split, model, round_idx, method_tag):
+    def _track_incoming_global(self, fl_ctx: FLContext, round_idx):
+        """Per-round evaluation + prediction dump for the RECEIVED global model.
+
+        Runs BEFORE local training, on self.model right after _consume_global, so it measures
+        the server aggregate exactly as this site consumes it (method-aware: full load for
+        fedavg/fedprox/ditto; local BN preserved under fedbn). `local` has no aggregate, so it
+        is skipped. Evaluating val AND test every round lets the best global be selected
+        offline by val AUC with test metrics + preds already on disk. Predictions AND saliency
+        maps are dumped per round; a small per-round metrics JSON is also written so the
+        selection table survives a crash before END_RUN.
+        """
+        if self.method == "local":
+            self.log_info(fl_ctx, "[incoming-global] method=local has no server aggregate; skipping eval")
+            return
+        client_name = fl_ctx.get_identity_name()
+        metrics = {"client": client_name, "round": int(round_idx), "method": self.method}
+        for split in ("val", "test"):
+            if not self.data_loader.get_data_for_split(split):
+                continue
+            core = self._evaluate_model(fl_ctx, split=split, model=self.model)
+            metrics[f"{split}_auc"] = float(core["auc"])
+            metrics[f"{split}_accuracy"] = float(core["accuracy"])
+            metrics[f"{split}_loss"] = float(core["loss"])
+            metrics[f"{split}_samples"] = int(core["samples"])
+            self.log_info(
+                fl_ctx,
+                f"[incoming-global] site={client_name} round={int(round_idx)} method={self.method} "
+                f"{split}_auc={core['auc']:.4f} n={core['samples']}"
+            )
+            try:
+                self._dump_predictions(fl_ctx, split=split, model=self.model,
+                                       round_idx=round_idx, method_tag="incoming_global",
+                                       save_saliency=True)
+            except Exception as e:
+                self.log_warning(fl_ctx, f"[incoming-global] preds dump ({split}) failed: {e}")
+        self.incoming_global_history.append(metrics)
+        # Durable per-round table so best-global selection survives a crash before END_RUN.
+        try:
+            persistent_dir = getattr(self, 'results_dir', "/workspace/gmic_results")
+            os.makedirs(persistent_dir, exist_ok=True)
+            out = os.path.join(
+                persistent_dir,
+                f"{client_name}_incoming_global_round{int(round_idx)}_metrics.json")
+            with open(out, "w") as f:
+                json.dump(metrics, f, indent=2)
+        except Exception as e:
+            self.log_warning(fl_ctx, f"[incoming-global] metrics json failed: {e}")
+
+
+    def _dump_predictions(self, fl_ctx: FLContext, split, model, round_idx, method_tag,
+                          save_saliency=True):
         """Save per-sample (view-level) malignancy scores + labels + site_id to CSV so
         breast-level AUC, DeLong CIs and cross-site sigma(AUC) can be computed offline.
+
+        save_saliency=False skips the (potentially large) per-image saliency .npz; the
+        prediction CSV (the actual preds) is always written. Default True writes both.
         """
         persistent_dir = getattr(self, 'results_dir', "/workspace/gmic_results")
         os.makedirs(persistent_dir, exist_ok=True)
@@ -1518,8 +1583,10 @@ class GMICFederatedExecutor(Executor):
                 probs = malignant_score(outputs).detach().cpu().numpy().reshape(-1)
                 tnp = targets.detach().cpu().numpy().reshape(-1)
                 # Malignant saliency channel (already a sigmoid probability), (B, h, w)
-                _, _, _, saliency = gmic_outputs(outputs)
-                sal_np = saliency[:, 1].detach().cpu().numpy() if saliency is not None else None
+                sal_np = None
+                if save_saliency:
+                    _, _, _, saliency = gmic_outputs(outputs)
+                    sal_np = saliency[:, 1].detach().cpu().numpy() if saliency is not None else None
                 for i, meta in enumerate(metas):
                     rows.append({
                         "site_id": client,
@@ -1532,7 +1599,7 @@ class GMICFederatedExecutor(Executor):
                         "prob_malignant": float(probs[i]),
                         "label": int(tnp[i]),
                     })
-                    if sal_np is not None:
+                    if save_saliency and sal_np is not None:
                         sal_maps.append(sal_np[i].astype(np.float32))
                         sal_paths.append(meta.get("path"))
                         sal_labels.append(int(tnp[i]))
@@ -1591,32 +1658,21 @@ class GMICFederatedExecutor(Executor):
         prior round; at round 0, the source_ckpt seed) — byte-for-byte the artifact the
         server deletes with its transient run dir. Filename is
         `{client}_incoming_global_round_{t}.pth`, kept distinct from the SENT-global cache so
-        the two are never confused. To resume a crashed run: point the server persistor's
-        `source_ckpt_file_full_name` at the highest-round file from any surviving client.
+        the two are never confused.
+
+        EVERY round is kept (no pruning): the best global by val AUC is often an earlier
+        round, so the full trajectory must survive for offline model selection — not just
+        the latest. This also still serves crash recovery: to resume, point the server
+        persistor's `source_ckpt_file_full_name` at the highest-round file from any
+        surviving client (all earlier rounds remain available too).
         """
         persistent_dir = getattr(self, 'results_dir', "/workspace/gmic_results")
         recv_dir = os.path.join(persistent_dir, "incoming_global")
         os.makedirs(recv_dir, exist_ok=True)
         client_name = fl_ctx.get_identity_name()
         out = os.path.join(recv_dir, f"{client_name}_incoming_global_round_{int(round_idx)}.pth")
-
-        # Rolling single-file-per-client, round-stamped: write the NEW file first, then prune
-        # older rounds ONLY after the save succeeds. This ordering is crash-safe -- a failure
-        # mid-write leaves the previous round's file intact, so there is always >=1 valid global
-        # on disk. The round number stays in the name so the latest is never mistaken for stale.
         torch.save(state_dict, out)
         self.log_info(fl_ctx, f"[recv-global] saved received aggregate (round {int(round_idx)}) -> {out}")
-
-        prefix = f"{client_name}_incoming_global_round_"
-        kept = os.path.basename(out)
-        for fname in os.listdir(recv_dir):
-            if fname.startswith(prefix) and fname.endswith(".pth") and fname != kept:
-                stale = os.path.join(recv_dir, fname)
-                try:
-                    os.remove(stale)
-                    self.log_info(fl_ctx, f"[recv-global] pruned older global -> {stale}")
-                except OSError as e:
-                    self.log_warning(fl_ctx, f"[recv-global] could not prune {stale}: {e}")
         return out
 
     def _save_local_model(self, fl_ctx: FLContext, shareable: Shareable, model=None):
@@ -1692,6 +1748,7 @@ class GMICFederatedExecutor(Executor):
             "training_history": self.training_history,
             "validation_history": self.validation_history,
             "test_history": self.test_history,
+            "incoming_global_history": self.incoming_global_history,
             "best_metrics": self.best_metrics,
             "data_splits": self.data_loader.get_split_info(),
             "class_distributions": {
