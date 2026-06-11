@@ -216,7 +216,8 @@ class GMICFederatedExecutor(Executor):
             use_augmentation: bool = False,       # train-only conservative augmentation
             augmentation: dict | None = None,     # {horizontal_flip,max_rotation_deg,intensity_jitter}
             cache_global_trajectory: bool = False,  # persist per-round SENT global w^t for Ditto replay
-            cache_incoming_global: bool = False,  # per round: save RECEIVED aggregate (all rounds) + eval val/test + dump preds
+            cache_incoming_global: bool = False,  # per round: save RECEIVED aggregate (all rounds; the Ditto-replay anchor trajectory)
+            eval_incoming_global: bool = True,    # also eval val/test + dump preds/saliency on each round's aggregate (heavy over many rounds; set False to just save the trajectory)
             resume_from_local_round: int = -1,    # resumed-job round 0: submit cached round-N weights untrained
             resume_ckpt_dir: str | None = None,   # dir holding {client}_gmic_model_round_{N}.pth (default: results_dir)
             salvage_eval_rounds: list | None = None,  # test-only salvage: reconstruct+eval these rounds' globals (no training)
@@ -355,6 +356,7 @@ class GMICFederatedExecutor(Executor):
             self.augmentation_cfg = augmentation or {}
             self.cache_global_trajectory = bool(cache_global_trajectory)
             self.cache_incoming_global = bool(cache_incoming_global)
+            self.eval_incoming_global = bool(eval_incoming_global)
             self.resume_from_local_round = int(resume_from_local_round)
             self.resume_ckpt_dir = resume_ckpt_dir
             # LOGICAL-round offset for resumed runs: NVFlare restarts current_round at 0 on a resume,
@@ -838,11 +840,15 @@ class GMICFederatedExecutor(Executor):
                 # Per-round eval + prediction dump on the received global (self.model right
                 # after _consume_global, i.e. the aggregate as this site consumes it). Done
                 # here, BEFORE training mutates the weights, so best-global selection can be
-                # done offline by val AUC with test metrics + preds already on disk.
-                try:
-                    self._track_incoming_global(fl_ctx, logical_round)
-                except Exception as e:
-                    self.log_warning(fl_ctx, f"[incoming-global] eval failed for round {logical_round}: {e}")
+                # done offline by val AUC with test metrics + preds already on disk. Heavy over
+                # many rounds (a val+test eval + saliency dump each round); skip via
+                # eval_incoming_global=False when you only need the saved trajectory (e.g. a long
+                # FedAvg run whose purpose is the Ditto-replay anchor).
+                if getattr(self, "eval_incoming_global", True):
+                    try:
+                        self._track_incoming_global(fl_ctx, logical_round)
+                    except Exception as e:
+                        self.log_warning(fl_ctx, f"[incoming-global] eval failed for round {logical_round}: {e}")
 
             # === NUCLEAR OPTION: FORCE RANDOM INIT FOR THIS RUN ===
             # self._reset_model_weights()

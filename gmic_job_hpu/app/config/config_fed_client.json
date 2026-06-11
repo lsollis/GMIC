@@ -29,7 +29,7 @@
           "val_split": 0.15,
           "test_split": 0.15,
           "random_seed": 42,
-          "output_dir": "/workspace/data/processed/fedprox_3client_fixedinit_20260609",
+          "output_dir": "/workspace/data/processed/fedavg_3client_20260611",
           "preprocess_cache_dir": "/workspace/data/processed/fedprox_3client",
           "num_processes": 4,
 
@@ -39,7 +39,7 @@
           "percent_t_key": "1",
           "lambda_l1": 1e-5,
 
-          "method": "fedprox",
+          "method": "fedavg",
           "fedprox_mu": 0.01,
           "ditto_lambda": 0.1,
           "lambda_global": 1.0,
@@ -51,7 +51,7 @@
 
           "train_log_batch_interval": 1,
           "log_lr_each_epoch": true,
-          "tb_log_dir": "/workspace/tb_logs_fedprox_3client_fixedinit_20260609",
+          "tb_log_dir": "/workspace/tb_logs_fedavg_3client_20260611",
           "disable_tensorboard": false,
           "per_file_logging": true,
           "tolerant_missing_metadata": false,
@@ -82,13 +82,11 @@
           "freeze_backbone_epochs": 2,
           "cache_global_trajectory": true,
           "cache_incoming_global": true,
+          "eval_incoming_global": false,
           "resume_from_local_round": -1,
-          "resume_ckpt_dir": "/workspace/data/processed/fedprox_3client",
+          "resume_ckpt_dir": "/workspace/data/processed/fedavg_3client_20260611",
 
-          "salvage_eval_rounds": [6, 8, 10, 14, 23, 26],
-          "salvage_ckpt_dir": "/workspace/data/processed/fedprox_3client_fixedinit_20260609",
-
-          "log_file": "/workspace/data/processed/fedprox_3client_fixedinit_20260609/executor.log",
+          "log_file": "/workspace/data/processed/fedavg_3client_20260611/executor.log",
           "file_integrity_check": true,
           "fail_on_integrity_error": false,
 
