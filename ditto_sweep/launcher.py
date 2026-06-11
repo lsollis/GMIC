@@ -47,6 +47,7 @@ import json
 import math
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -311,6 +312,27 @@ def launch(job_dir, workspace, clients, gpus, threads, log_path):
     return proc, lf
 
 
+def kill_run(proc, label):
+    """Hard-kill a run AND its detached simulator workers. NVFlare's simulator_worker processes call
+    setsid (session leaders), so they survive their parent and keep holding GPU memory -- killing only
+    `proc` would leak them. Match every process whose cmdline references this run's workspace
+    (ws_<label>/ or ws_<label> as an arg) and SIGKILL it. The label is unique per run, so this can't
+    touch another run; the trailing [/ ] boundary keeps e.g. ws_l1 from matching ws_l10."""
+    try:
+        proc.kill()
+    except Exception:
+        pass
+    try:
+        out = subprocess.run(["pgrep", "-f", f"ws_{label}[/ ]"], capture_output=True, text=True, timeout=10).stdout
+        for pid in out.split():
+            try:
+                os.kill(int(pid), signal.SIGKILL)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+
 # --------------------------------------------------------------------------- metrics
 def collect_metrics(output_base, label, clients):
     """Read each client's best personal-model val AUC for one run (subdir {output_base}/{label}).
@@ -423,6 +445,10 @@ def main():
                     help="pre-flight: required free memory on each target GPU before launching "
                          "(GMIC Ditto peaks ~7 GiB/client); set 0 to disable the floor")
     ap.add_argument("--skip-gpu-check", action="store_true", help="bypass the pre-flight GPU check")
+    ap.add_argument("--run-timeout-min", type=float, default=90.0,
+                    help="kill a run (and its detached simulator workers) if it exceeds this many "
+                         "minutes -- NVFlare sims can hang and camp on GPUs. Set above a healthy run's "
+                         "wall time; 0 disables.")
     a = ap.parse_args()
 
     clients = [c.strip() for c in a.clients.split(",") if c.strip()]
@@ -492,26 +518,48 @@ def main():
     # Schedule the sweep across GPU pools (one running job per pool).
     pending = list(runs)
     running = {}  # pool_idx -> (run, proc, lf, start_ts)
-    print(f"[run] starting sweep of {len(pending)} runs across {len(pools)} pools")
-    while pending or running:
-        for pi in range(len(pools)):
-            if pi not in running and pending:
-                r = pending.pop(0)
-                ws = os.path.join(a.work_root, f"ws_{r['label']}")
-                log_path = os.path.join(a.work_root, f"run_{r['label']}.log")
-                proc, lf = launch(r["job_dir"], ws, clients, pools[pi], a.threads, log_path)
-                running[pi] = (r, proc, lf, time.time())
-                print(f"[run] launched {r['display']} on pool{pi}={pools[pi]} -> {log_path}")
-        for pi in list(running.keys()):
-            r, proc, lf, t0 = running[pi]
-            rc = proc.poll()
-            if rc is not None:
+    timeout_s = a.run_timeout_min * 60
+    print(f"[run] starting sweep of {len(pending)} runs across {len(pools)} pools "
+          f"(per-run timeout {a.run_timeout_min} min)")
+    try:
+        while pending or running:
+            for pi in range(len(pools)):
+                if pi not in running and pending:
+                    r = pending.pop(0)
+                    ws = os.path.join(a.work_root, f"ws_{r['label']}")
+                    log_path = os.path.join(a.work_root, f"run_{r['label']}.log")
+                    proc, lf = launch(r["job_dir"], ws, clients, pools[pi], a.threads, log_path)
+                    running[pi] = (r, proc, lf, time.time())
+                    print(f"[run] launched {r['display']} on pool{pi}={pools[pi]} -> {log_path}")
+            for pi in list(running.keys()):
+                r, proc, lf, t0 = running[pi]
+                rc = proc.poll()
+                if rc is None and timeout_s > 0 and (time.time() - t0) > timeout_s:
+                    # Hung run (NVFlare simulator can spin forever): kill it + its detached workers so
+                    # it stops camping on the GPUs. The config is left with no result file -> NA.
+                    print(f"[run] {r['display']} on pool{pi} TIMED OUT after {a.run_timeout_min} min "
+                          f"-> killing (hung); freeing pool")
+                    kill_run(proc, r["label"])
+                    lf.close()
+                    del running[pi]
+                    continue
+                if rc is not None:
+                    lf.close()
+                    dt = time.time() - t0
+                    print(f"[run] {r['display']} on pool{pi} finished rc={rc} in {dt/60:.1f} min")
+                    del running[pi]
+            if running:
+                time.sleep(a.poll)
+    finally:
+        # Never leave detached workers behind (e.g. on Ctrl-C) -- that is what camps on the GPUs.
+        for pi, (r, proc, lf, t0) in list(running.items()):
+            if proc.poll() is None:
+                print(f"[run] cleanup: killing still-running {r['display']}")
+                kill_run(proc, r["label"])
+            try:
                 lf.close()
-                dt = time.time() - t0
-                print(f"[run] {r['display']} on pool{pi} finished rc={rc} in {dt/60:.1f} min")
-                del running[pi]
-        if running:
-            time.sleep(a.poll)
+            except Exception:
+                pass
 
     # FedAvg trajectory run: no sweep to collect -- just point at the cached global trajectory.
     if a.fedavg:
