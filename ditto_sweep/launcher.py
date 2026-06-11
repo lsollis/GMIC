@@ -195,14 +195,27 @@ def preflight_gpu_check(pools, min_free_gib):
     print(f"\n[gpu-check] BLOCKED: target GPU(s) below {min_free_gib} GiB free -> GMIC Ditto would OOM:")
     for g, f in bad:
         print(f"  GPU {g}: only {f:.1f} GiB free")
+    # Point at GPUs that ARE usable so you can just retarget (--gpu-pools ...).
+    usable = sorted((g for g, f in free.items() if f >= min_free_gib),
+                    key=lambda x: int(x) if x.isdigit() else x)
+    if usable:
+        print(f"[gpu-check] GPUs with >= {min_free_gib} GiB free you can use instead: {','.join(usable)}")
     try:
         apps = gpu_compute_apps()
         if apps:
-            print("[gpu-check] compute processes holding GPU memory (pid, name, MiB) -- likely orphaned\n"
-                  "            NVFlare simulator workers from a prior sweep; free them and retry:")
+            # When names are '[Not Found]' the PIDs are in another namespace (host / another
+            # container) and cannot be killed from in here -- don't suggest a futile kill.
+            elsewhere = sum(1 for _, name, _ in apps if name in ("[Not Found]", "", "N/A"))
+            print("[gpu-check] processes holding GPU memory (pid, name, MiB):")
             for pid, name, mem in apps:
                 print(f"            {pid:>8}  {name:<28} {mem} MiB")
-            print("[gpu-check] e.g.  kill -9 " + " ".join(p for p, _, _ in apps[:8]))
+            if elsewhere == len(apps):
+                print("[gpu-check] all names are '[Not Found]' -> these run on the HOST or another\n"
+                      "            container, not here; you can't kill them from this shell. Either use\n"
+                      "            the free GPUs above, or from the host: kill them / nvidia-smi --gpu-reset.")
+            else:
+                print("[gpu-check] likely orphaned simulator workers; free them with:  kill -9 "
+                      + " ".join(p for p, name, _ in apps if name not in ("[Not Found]", "", "N/A")))
     except Exception:
         pass
     print("[gpu-check] (override with --skip-gpu-check once you're sure the GPUs are usable.)")
