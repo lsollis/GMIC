@@ -29,7 +29,7 @@
           "val_split": 0.15,
           "test_split": 0.15,
           "random_seed": 42,
-          "output_dir": "/workspace/data/processed/fedavg_3client_bbtrain_20260611",
+          "output_dir": "/workspace/data/processed/fedavg_3client_20260611",
           "preprocess_cache_dir": "/workspace/data/processed/fedprox_3client",
           "num_processes": 4,
 
@@ -51,7 +51,7 @@
 
           "train_log_batch_interval": 1,
           "log_lr_each_epoch": true,
-          "tb_log_dir": "/workspace/tb_logs_fedavg_3client_bbtrain_20260611",
+          "tb_log_dir": "/workspace/tb_logs_fedavg_3client_20260611",
           "disable_tensorboard": false,
           "per_file_logging": true,
           "tolerant_missing_metadata": false,
@@ -84,9 +84,9 @@
           "cache_incoming_global": true,
           "eval_incoming_global": true,
           "resume_from_local_round": -1,
-          "resume_ckpt_dir": "/workspace/data/processed/fedavg_3client_bbtrain_20260611",
+          "resume_ckpt_dir": "/workspace/data/processed/fedavg_3client_20260611",
 
-          "log_file": "/workspace/data/processed/fedavg_3client_bbtrain_20260611/executor.log",
+          "log_file": "/workspace/data/processed/fedavg_3client_20260611/executor.log",
           "file_integrity_check": true,
           "fail_on_integrity_error": false,
 
