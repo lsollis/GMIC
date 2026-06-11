@@ -83,7 +83,7 @@
           "cache_global_trajectory": true,
           "cache_incoming_global": true,
           "eval_incoming_global": true,
-          "resume_from_local_round": -1,
+          "resume_from_local_round": 15,
           "resume_ckpt_dir": "/workspace/data/processed/fedavg_3client_20260611",
 
           "log_file": "/workspace/data/processed/fedavg_3client_20260611/executor.log",
