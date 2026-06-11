@@ -217,7 +217,8 @@ class GMICFederatedExecutor(Executor):
             augmentation: dict | None = None,     # {horizontal_flip,max_rotation_deg,intensity_jitter}
             cache_global_trajectory: bool = False,  # persist per-round SENT global w^t for Ditto replay
             cache_incoming_global: bool = False,  # per round: save RECEIVED aggregate (all rounds; the Ditto-replay anchor trajectory)
-            eval_incoming_global: bool = True,    # also eval val/test + dump preds/saliency on each round's aggregate (heavy over many rounds; set False to just save the trajectory)
+            eval_incoming_global: bool = True,    # also eval val/test + dump preds on each round's aggregate (the per-round shared-global stats; ~6min/round)
+            incoming_global_saliency: bool = False,  # also dump per-round saliency .npz in that eval (GBs over many rounds; only for a short run where you want per-round heatmaps)
             resume_from_local_round: int = -1,    # resumed-job round 0: submit cached round-N weights untrained
             resume_ckpt_dir: str | None = None,   # dir holding {client}_gmic_model_round_{N}.pth (default: results_dir)
             salvage_eval_rounds: list | None = None,  # test-only salvage: reconstruct+eval these rounds' globals (no training)
@@ -357,6 +358,7 @@ class GMICFederatedExecutor(Executor):
             self.cache_global_trajectory = bool(cache_global_trajectory)
             self.cache_incoming_global = bool(cache_incoming_global)
             self.eval_incoming_global = bool(eval_incoming_global)
+            self.incoming_global_saliency = bool(incoming_global_saliency)
             self.resume_from_local_round = int(resume_from_local_round)
             self.resume_ckpt_dir = resume_ckpt_dir
             # LOGICAL-round offset for resumed runs: NVFlare restarts current_round at 0 on a resume,
@@ -1750,7 +1752,7 @@ class GMICFederatedExecutor(Executor):
             try:
                 self._dump_predictions(fl_ctx, split=split, model=self.model,
                                        round_idx=round_idx, method_tag="incoming_global",
-                                       save_saliency=True)
+                                       save_saliency=getattr(self, "incoming_global_saliency", False))
             except Exception as e:
                 self.log_warning(fl_ctx, f"[incoming-global] preds dump ({split}) failed: {e}")
         self.incoming_global_history.append(metrics)
