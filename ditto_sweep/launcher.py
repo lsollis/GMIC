@@ -164,12 +164,16 @@ def build_runs(a):
         return [{"label": "fedavg", "display": "fedavg",
                  "overrides": {"method": "fedavg", "cache_incoming_global": True,
                                "cache_global_trajectory": True}}]
+    # Sweeps select on the deployed/personal val AUC, so the per-round incoming-global eval +
+    # trajectory caching (inherited from the base config) are pure wasted memory/time here -- and the
+    # extra forward passes raise OOM risk. Disable them for sweep runs (only --fedavg needs them).
+    no_cache = {"cache_incoming_global": False, "cache_global_trajectory": False}
     if not a.modulewise:
         runs = []
         for lam in [float(x) for x in a.lambdas.split(",") if x.strip()]:
             ls = _lam_str(lam)
             runs.append({"label": f"l{ls}", "display": ls,
-                         "overrides": {"method": "ditto", "ditto_lambda": lam}})
+                         "overrides": {"method": "ditto", "ditto_lambda": lam, **no_cache}})
         return runs
 
     anchor = float(a.anchor)
@@ -180,7 +184,7 @@ def build_runs(a):
         label = f"mw_g{_lam_str(g)}_l{_lam_str(l)}_f{_lam_str(f)}"
         return {"label": label, "display": f"g={_lam_str(g)} l={_lam_str(l)} f={_lam_str(f)}",
                 "overrides": {"method": "ditto_modulewise",
-                              "lambda_global": g, "lambda_local": l, "lambda_fusion": f}}
+                              "lambda_global": g, "lambda_local": l, "lambda_fusion": f, **no_cache}}
 
     seen, runs = set(), []
     base = mk(anchor, anchor, anchor)
