@@ -1410,10 +1410,19 @@ class GMICFederatedExecutor(Executor):
             epoch_targets = []
             self.log_info(fl_ctx, f"Training epoch {epoch + 1}/{self.epochs}")
 
+            # Cumulative epoch index across the WHOLE run (not the per-call epoch, which resets
+            # to 0 every FL round). Centralized (1 round, many epochs): == epoch, unchanged. FL
+            # (epochs=1 per round): == logical_round, so any lever that counts "epochs" correctly
+            # spans rounds. Without this, the freeze gate (epoch<N) was ALWAYS true in FL (epoch
+            # is always 0 when epochs=1) and silently froze the backbone every round forever --
+            # whereas centrally (epochs=40) it correctly froze epochs 0..N-1 then trained.
+            logical_round = int(shareable.get_header(AppConstants.CURRENT_ROUND, 0)) + self._round_offset
+            global_epoch = logical_round * self.epochs + epoch
+
             # Backbone freeze lever: keep backbones frozen for the first N epochs, then unfreeze
             # once (anti-overfitting warmup). No-op when freeze_backbone_epochs==0 (default).
             if self.freeze_backbone_epochs > 0:
-                self._apply_backbone_freeze(fl_ctx, frozen=(epoch < self.freeze_backbone_epochs))
+                self._apply_backbone_freeze(fl_ctx, frozen=(global_epoch < self.freeze_backbone_epochs))
 
             for batch_idx, (inputs, targets, metadata) in enumerate(self.data_loader.get_batch_iterator('train')):
                 if abort_signal.triggered:
@@ -1519,7 +1528,7 @@ class GMICFederatedExecutor(Executor):
                 # None scheduler -> no-op. Handle all three. `epoch` is passed so a cosine
                 # schedule can HOLD during the frozen warmup and only begin decaying at unfreeze
                 # (so cosine_t_max counts post-unfreeze epochs, not frozen ones).
-                self._scheduler_step(val_auc, epoch=epoch)
+                self._scheduler_step(val_auc, epoch=global_epoch)
                 if self.early_stopper.step(val_auc, self.model):
                     round_best_val = val_auc
                 if self.early_stopper.should_stop():
