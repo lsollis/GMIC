@@ -148,6 +148,67 @@ def render_job(label, arg_overrides, rounds, base_job, work_root, output_base, c
     return job_dir
 
 
+def _nvidia_smi(query, extra=()):
+    out = subprocess.run(["nvidia-smi", f"--query-{query}", "--format=csv,noheader,nounits", *extra],
+                         capture_output=True, text=True, timeout=20)
+    return out.stdout.strip().splitlines()
+
+
+def gpu_free_gib():
+    """{gpu_index(str): free_GiB} from nvidia-smi."""
+    free = {}
+    for line in _nvidia_smi("gpu=index,memory.free"):
+        idx, mb = [x.strip() for x in line.split(",")]
+        free[idx] = float(mb) / 1024.0
+    return free
+
+
+def gpu_compute_apps():
+    """[(pid, name, used_MiB)] of all compute processes on the box (for spotting orphans)."""
+    apps = []
+    for line in _nvidia_smi("compute-apps=pid,process_name,used_memory"):
+        parts = [x.strip() for x in line.split(",")]
+        if len(parts) >= 3:
+            apps.append((parts[0], parts[1], parts[2]))
+    return apps
+
+
+def preflight_gpu_check(pools, min_free_gib):
+    """Refuse to launch onto GPUs that aren't mostly free (orphaned workers / competing jobs are the
+    usual cause of the 20-min OOM-then-NA failures). Returns True if OK to proceed."""
+    target = sorted({g for pool in pools for g in pool}, key=lambda x: int(x) if x.isdigit() else x)
+    try:
+        free = gpu_free_gib()
+    except Exception as e:
+        print(f"[gpu-check] could not query nvidia-smi ({e}); skipping check")
+        return True
+    print("[gpu-check] target GPU free memory:")
+    bad = []
+    for g in target:
+        f = free.get(str(g))
+        print(f"  GPU {g}: {f:.1f} GiB free" if f is not None else f"  GPU {g}: (not reported by nvidia-smi)")
+        if f is not None and f < min_free_gib:
+            bad.append((g, f))
+    if not bad:
+        print(f"[gpu-check] OK (all target GPUs >= {min_free_gib} GiB free)")
+        return True
+    print(f"\n[gpu-check] BLOCKED: target GPU(s) below {min_free_gib} GiB free -> GMIC Ditto would OOM:")
+    for g, f in bad:
+        print(f"  GPU {g}: only {f:.1f} GiB free")
+    try:
+        apps = gpu_compute_apps()
+        if apps:
+            print("[gpu-check] compute processes holding GPU memory (pid, name, MiB) -- likely orphaned\n"
+                  "            NVFlare simulator workers from a prior sweep; free them and retry:")
+            for pid, name, mem in apps:
+                print(f"            {pid:>8}  {name:<28} {mem} MiB")
+            print("[gpu-check] e.g.  kill -9 " + " ".join(p for p, _, _ in apps[:8]))
+    except Exception:
+        pass
+    print("[gpu-check] (override with --skip-gpu-check once you're sure the GPUs are usable.)")
+    return False
+
+
 def build_runs(a):
     """Build the list of runs to sweep: each is {"label","display","overrides"}.
 
@@ -345,6 +406,10 @@ def main():
                          "This is the explicit data-prep step; the sweep itself is read-only.")
     ap.add_argument("--poll", type=int, default=20, help="seconds between scheduler polls")
     ap.add_argument("--dry-run", action="store_true", help="render jobs + print plan, don't run")
+    ap.add_argument("--min-free-gib", type=float, default=10.0,
+                    help="pre-flight: required free memory on each target GPU before launching "
+                         "(GMIC Ditto peaks ~7 GiB/client); set 0 to disable the floor")
+    ap.add_argument("--skip-gpu-check", action="store_true", help="bypass the pre-flight GPU check")
     a = ap.parse_args()
 
     clients = [c.strip() for c in a.clients.split(",") if c.strip()]
@@ -373,6 +438,12 @@ def main():
             ws = os.path.join(a.work_root, f"ws_{r['label']}")
             print("  would run:", " ".join(simulator_cmd(r["job_dir"], ws, clients, pools[0], a.threads)))
         return
+
+    # Pre-flight: fail in 2 seconds (not 20 minutes of OOM) if the target GPUs aren't free. Orphaned
+    # NVFlare simulator workers from a prior sweep are the usual cause of an all-NA table.
+    if a.min_free_gib > 0 and not a.skip_gpu_check:
+        if not preflight_gpu_check(pools, a.min_free_gib):
+            sys.exit(2)
 
     # Build the shared per-site crop caches ONCE (1-round solo run) before any parallel runs, if
     # they're missing -- preprocessing the (train/val/test SPLITS of the) data is fine; what the
