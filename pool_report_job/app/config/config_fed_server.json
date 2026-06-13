@@ -9,8 +9,8 @@
       "args": {
         "task_name": "pool_report",
         "poolable_methods": ["incoming_global", "pretrained_baseline"],
-        "timeout": 900,
-        "out_file": "/workspace/server_logs/salvage_pooled.json"
+        "timeout": 7200,
+        "out_file": "/workspace/server_logs/pooled_stats_fedavg.json"
       }
     }
   ],
