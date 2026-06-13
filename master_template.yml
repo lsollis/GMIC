@@ -87,7 +87,7 @@ local_client_resources: |
   {
     "format_version": 2,
     "client": {
-      "retry_timeout": 30,
+      "retry_timeout": 7200,
       "compression": "Gzip"
     },
     "components": [
@@ -198,7 +198,7 @@ local_server_resources: |
           {
               "admin_storage": "transfer",
               "max_num_clients": 2,
-              "heart_beat_timeout": 600,
+              "heart_beat_timeout": 7200,
               "num_server_workers": 4,
               "download_job_url": "http://download.server.com/",
               "compression": "Gzip"
