@@ -56,6 +56,25 @@ python launcher.py \
 - `--dry-run` renders jobs and prints the simulator commands without launching.
 - `--metric mean_site` to rank by mean instead of worst-site (worst-site is the default).
 
+### FedProx μ sweep (fair counterpart to the λ sweep)
+Same harness, same selection (worst-site **val** AUC), but `method=fedprox` with one `fedprox_mu`
+per run instead of a Ditto λ. The deployed/ranked model is the **shared global w** (FedProx has no
+personal model), so this finds the μ that best balances the sites under one shared model — the fair
+analogue to the Ditto λ search. The base FedProx run used μ=0.01, which was too weak; this searches
+around it.
+```bash
+python launcher.py \
+  --base-job ../gmic_job --fedprox \
+  --mus 0.001,0.01,0.05,0.1,0.5,1.0 \
+  --rounds 20 \
+  --gpu-pools "1,2,3;4,5,6" \
+  --output-base /workspace/sim/fedprox \
+  --work-root  /workspace/sim/fedprox_runs
+```
+Crop caches (per-site) are shared with the Ditto sweep — built once, reused read-only. Output and
+ranking are identical in form to the λ sweep (`sweep_summary.json`, per-site
+`*_best_val_overall_gmic_metrics.json`); the table header reads `FEDPROX MU SWEEP RESULTS`.
+
 ## Output
 - Live per-run logs: `<work-root>/run_l<λ>.log`, `<work-root>/cacheprep.log`.
 - Per-site results: `<output-base>/l<λ>/<site>/<site>_best_val_overall_gmic_metrics.json`.

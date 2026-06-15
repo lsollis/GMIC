@@ -20,12 +20,15 @@ Key design
 This script can't be exercised on the Windows clone (no GPUs / real data); run it on the
 DGX. It only shells out to `nvflare simulator` and reads JSON the executor writes.
 
-Two modes
----------
+Modes
+-----
 - scalar (default): one ditto_lambda per run (method=ditto), ranked by worst-site val AUC.
 - module-wise (--modulewise): method=ditto_modulewise with per-group lambdas {global,local,fusion}.
   A one-at-a-time sweep ANCHORED at --anchor (default 0.1, the scalar sweet spot): a baseline with
   all three groups at the anchor, then each group varied over --group-values while the others hold.
+- fedprox (--fedprox): one fedprox_mu per run (method=fedprox), ranked by worst-site val AUC. Same
+  harness/selection as the scalar Ditto sweep; the deployed/ranked model is the shared global w (no
+  personal model). Use it to give FedProx the same mu search Ditto got for lambda.
 
 Examples
 --------
@@ -33,6 +36,11 @@ Examples
   python launcher.py --base-job ../gmic_job --lambdas 0.01,0.05,0.1,0.5,1.0,2.0 \
     --rounds 20 --gpu-pools "1,2,3;4,5,6" \
     --output-base /workspace/sim/ditto --work-root /workspace/sim/ditto_runs
+
+  # fedprox mu sweep (fair counterpart to the ditto lambda sweep)
+  python launcher.py --base-job ../gmic_job --fedprox --mus 0.001,0.01,0.05,0.1,0.5,1.0 \
+    --rounds 20 --gpu-pools "1,2,3;4,5,6" \
+    --output-base /workspace/sim/fedprox --work-root /workspace/sim/fedprox_runs
 
   # module-wise sweep anchored at the scalar best (0.1)
   python launcher.py --base-job ../gmic_job --modulewise --anchor 0.1 \
@@ -227,6 +235,8 @@ def build_runs(a):
     """Build the list of runs to sweep: each is {"label","display","overrides"}.
 
     Scalar (default): one run per --lambdas value, method=ditto.
+    FedProx (--fedprox): one run per --mus value, method=fedprox (ranked by the shared global w's
+    worst-site val AUC -- the fair mu counterpart to the scalar Ditto lambda sweep).
     Module-wise (--modulewise): a one-at-a-time sweep ANCHORED at --anchor (default 0.1, the global
     Ditto sweet spot). The baseline sets all three groups to the anchor (== scalar Ditto at the
     anchor); then each group {global, local, fusion} is varied over --group-values in turn while the
@@ -243,6 +253,18 @@ def build_runs(a):
     # trajectory caching (inherited from the base config) are pure wasted memory/time here -- and the
     # extra forward passes raise OOM risk. Disable them for sweep runs (only --fedavg needs them).
     no_cache = {"cache_incoming_global": False, "cache_global_trajectory": False}
+    if a.fedprox:
+        runs = []
+        for mu in [float(x) for x in a.mus.split(",") if x.strip()]:
+            ms = _lam_str(mu)
+            runs.append({"label": f"mu{ms}", "display": f"mu={ms}",
+                         "overrides": {"method": "fedprox", "fedprox_mu": mu, **no_cache}})
+        return runs
+    if a.fedbn:
+        # FedBN has no hyperparameter (BN kept local on every load) -> a SINGLE run, not a sweep.
+        # Ranked/reported like the others by the shared-backbone+local-BN model's per-site val AUC.
+        return [{"label": "fedbn", "display": "fedbn",
+                 "overrides": {"method": "fedbn", "use_fedbn": True, **no_cache}}]
     if not a.modulewise:
         runs = []
         for lam in [float(x) for x in a.lambdas.split(",") if x.strip()]:
@@ -416,6 +438,13 @@ def main():
                          "lambda field(s), num_rounds, and the output/tb/log paths per run.")
     ap.add_argument("--lambdas", default="0.01,0.05,0.1,0.5,1.0,2.0",
                     help="scalar Ditto: comma-separated ditto_lambda values")
+    ap.add_argument("--fedprox", action="store_true",
+                    help="sweep method=fedprox proximal mu (--mus), ranked by worst-site val AUC")
+    ap.add_argument("--mus", default="0.001,0.01,0.05,0.1,0.5,1.0",
+                    help="fedprox: comma-separated fedprox_mu values")
+    ap.add_argument("--fedbn", action="store_true",
+                    help="single method=fedbn run (no hyperparameter; BN kept local), reported "
+                         "per-site like the sweeps")
     ap.add_argument("--fedavg", action="store_true",
                     help="run ONE FedAvg job that caches the per-round global trajectory (the anchor "
                          "for Ditto replay via replay_sweep.py); no sweep, no HPU")
@@ -457,8 +486,11 @@ def main():
     os.makedirs(a.work_root, exist_ok=True)
 
     runs = build_runs(a)
-    mode = "module-wise" if a.modulewise else "scalar"
-    title = "DITTO MODULE-WISE SWEEP RESULTS" if a.modulewise else "DITTO LAMBDA SWEEP RESULTS"
+    mode = ("fedprox" if a.fedprox else "fedbn" if a.fedbn else
+            "module-wise" if a.modulewise else "scalar")
+    title = ("FEDPROX MU SWEEP RESULTS" if a.fedprox else
+             "FEDBN RUN RESULTS" if a.fedbn else
+             "DITTO MODULE-WISE SWEEP RESULTS" if a.modulewise else "DITTO LAMBDA SWEEP RESULTS")
     print(f"[sweep] mode={mode} runs={len(runs)} rounds={a.rounds} clients={clients}")
     if a.modulewise:
         print(f"[sweep] anchor={_lam_str(a.anchor)} group_values={a.group_values}")
