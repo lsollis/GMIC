@@ -7,7 +7,7 @@
         "id": "PoolReportExecutor",
         "path": "pool_report_executor.PoolReportExecutor",
         "args": {
-          "results_dir": "/workspace/data/processed/fedavg_3client_20260611",
+          "results_dir": "/workspace/data/processed/fedprox_3client_20260613",
           "task_name": "pool_report",
           "methods": ["incoming_global", "pretrained_baseline"]
         }
