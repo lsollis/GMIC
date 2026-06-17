@@ -30,7 +30,7 @@
           "test_split": 0.15,
           "random_seed": 42,
 
-          "output_dir": "/workspace/sim/ditto_mw_g0.05_l0.5_f0.05/{site}",
+          "output_dir": "/workspace/sim/ditto_mw_g0.01_l0.5_f0/{site}",
           "preprocess_cache_dir_map": {
             "UHCC": "/workspace/data/processed/fedprox_3client",
             "HPU": "/workspace/data/processed/ditto_sim_cache/HPU",
@@ -48,15 +48,15 @@
           "method": "ditto_modulewise",
           "ditto_lambda": 0.05,
           "fedprox_mu": 0.1,
-          "lambda_global": 0.05,
+          "lambda_global": 0.01,
           "lambda_local": 0.5,
-          "lambda_fusion": 0.05,
+          "lambda_fusion": 0.0,
           "use_fedbn": false,
           "local_epochs": null,
 
           "train_log_batch_interval": 1,
           "log_lr_each_epoch": true,
-          "tb_log_dir": "/workspace/sim/ditto_mw_g0.05_l0.5_f0.05/tb/{site}",
+          "tb_log_dir": "/workspace/sim/ditto_mw_g0.01_l0.5_f0/tb/{site}",
           "disable_tensorboard": false,
           "per_file_logging": true,
           "tolerant_missing_metadata": false,
@@ -90,7 +90,7 @@
           "cache_incoming_global": true,
           "eval_incoming_global": true,
 
-          "log_file": "/workspace/sim/ditto_mw_g0.05_l0.5_f0.05/{site}/executor.log",
+          "log_file": "/workspace/sim/ditto_mw_g0.01_l0.5_f0/{site}/executor.log",
           "file_integrity_check": true,
           "fail_on_integrity_error": false,
 
