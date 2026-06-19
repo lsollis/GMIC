@@ -26,10 +26,14 @@ from sklearn.metrics import roc_auc_score
 # so the bc_executor import works regardless of cwd / checkout root (/workspace vs /raid/...).
 HERE = os.path.dirname(os.path.abspath(__file__))
 CLIENTS = ["UHCC", "HPU", "RSNA-GCP"]
-# job_dir -> output prediction tag (kept distinct from the final-round 'ditto'/'ditto_modulewise')
-JOBS = {
-    os.path.join(HERE, "gmic_job_ditto_sim"): "ditto_perround",
-    # os.path.join(HERE, "gmic_job_ditto_mw_sim"): "ditto_modulewise_perround",   # uncomment when it finishes
+# Selectable jobs: key -> (job_dir, output prediction tag). Choose on the command line:
+#   python dump_ditto_perround_preds.py                              # all jobs
+#   python dump_ditto_perround_preds.py mw                           # just module-wise
+#   CUDA_VISIBLE_DEVICES=3 python dump_ditto_perround_preds.py mw    # ...on physical GPU 3
+# Distinct out dirs per job, so two invocations can run concurrently on different GPUs.
+ALL_JOBS = {
+    "ditto": (os.path.join(HERE, "gmic_job_ditto_sim"),    "ditto_perround"),
+    "mw":    (os.path.join(HERE, "gmic_job_ditto_mw_sim"), "ditto_modulewise_perround"),
 }
 
 
@@ -118,6 +122,12 @@ def run_job(job_dir, out_tag):
 
 
 if __name__ == "__main__":
-    for job_dir, out_tag in JOBS.items():
+    keys = [a for a in sys.argv[1:] if not a.startswith("-")] or list(ALL_JOBS)
+    bad = [k for k in keys if k not in ALL_JOBS]
+    if bad:
+        print(f"unknown job(s) {bad}; choices: {list(ALL_JOBS)}")
+        sys.exit(2)
+    for k in keys:
+        job_dir, out_tag = ALL_JOBS[k]
         run_job(job_dir, out_tag)
-    print("\nDone. In the notebook, set the Ditto entry to tag '<...>_perround' with trajectory=True.")
+    print("\nDone. In the notebook, uncomment the matching entry (tag '*_perround', trajectory=True).")
