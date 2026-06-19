@@ -22,12 +22,14 @@ import numpy as np
 import torch
 from sklearn.metrics import roc_auc_score
 
-REPO = "/raid/home/lsollis/GMIC/GMIC"
+# Resolve job dirs RELATIVE TO THIS SCRIPT (it lives at the repo root, next to the job folders),
+# so the bc_executor import works regardless of cwd / checkout root (/workspace vs /raid/...).
+HERE = os.path.dirname(os.path.abspath(__file__))
 CLIENTS = ["UHCC", "HPU", "RSNA-GCP"]
 # job_dir -> output prediction tag (kept distinct from the final-round 'ditto'/'ditto_modulewise')
 JOBS = {
-    f"{REPO}/gmic_job_ditto_sim": "ditto_perround",
-    # f"{REPO}/gmic_job_ditto_mw_sim": "ditto_modulewise_perround",   # uncomment when it finishes
+    os.path.join(HERE, "gmic_job_ditto_sim"): "ditto_perround",
+    # os.path.join(HERE, "gmic_job_ditto_mw_sim"): "ditto_modulewise_perround",   # uncomment when it finishes
 }
 
 
@@ -54,7 +56,12 @@ def _breast_val_auc(rdir, site, out_tag, r, breast_aggregate):
 
 
 def run_job(job_dir, out_tag):
-    sys.path.insert(0, os.path.join(job_dir, "app", "custom"))
+    custom = os.path.join(job_dir, "app", "custom")
+    if not os.path.isdir(custom):
+        print(f"[error] no app/custom at {custom} -- run from the repo (script must sit next to "
+              f"gmic_job_ditto_sim/), or fix the job path.")
+        return
+    sys.path.insert(0, custom)
     from bc_executor import GMICFederatedExecutor
     from fl_utils import breast_aggregate
 
