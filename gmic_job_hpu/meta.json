@@ -1,5 +1,5 @@
 {
-    "name": "gmic_job_fedprox_mu0.1_3client",
+    "name": "gmic_job_ditto_l0.05_3client",
     "min_clients": 3,
     "mandatory_clients": [],
     "deploy_map": {
