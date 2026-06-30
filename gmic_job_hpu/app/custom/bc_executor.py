@@ -309,6 +309,9 @@ class GMICFederatedExecutor(Executor):
             # on val+test BEFORE local training. Lets the best global be picked offline by
             # val AUC with test already on hand. Populated when cache_incoming_global=True.
             self.incoming_global_history = []
+            # Per-round metrics for the DEPLOYED PERSONAL model (Ditto family), val+test, mirroring
+            # incoming_global_history; saved into final_results.json for the same per-round table.
+            self.personal_perround_history = []
             self.gmic_parameters_cfg = gmic_parameters or {}
             self.loss_name = loss
             self.optimizer_cfg = optimizer or {"name": "adam", "weight_decay": self.weight_decay}
@@ -1821,6 +1824,9 @@ class GMICFederatedExecutor(Executor):
                                        save_saliency=False)
             except Exception as e:
                 self.log_warning(fl_ctx, f"[personal-perround] preds dump ({split}) failed: {e}")
+        if not hasattr(self, "personal_perround_history"):
+            self.personal_perround_history = []
+        self.personal_perround_history.append(metrics)
         # Durable per-round table (mirrors incoming-global), distinct filename.
         try:
             persistent_dir = getattr(self, 'results_dir', "/workspace/gmic_results")
@@ -2025,6 +2031,7 @@ class GMICFederatedExecutor(Executor):
             "validation_history": self.validation_history,
             "test_history": self.test_history,
             "incoming_global_history": self.incoming_global_history,
+            "personal_perround_history": getattr(self, "personal_perround_history", []),
             "best_metrics": self.best_metrics,
             "data_splits": self.data_loader.get_split_info(),
             "class_distributions": {
