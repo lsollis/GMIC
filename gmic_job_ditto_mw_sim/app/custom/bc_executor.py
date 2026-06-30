@@ -948,6 +948,17 @@ class GMICFederatedExecutor(Executor):
                 self.log_info(fl_ctx, "Phase 3: Skipping test (not final round)")
                 test_metrics = {}
 
+            # --- Per-round PERSONALIZED-model trajectory (Ditto family) ---
+            # Dump the deployed personal model v's val+test preds EVERY round (tag "<method>_perround",
+            # logged [personal-perround]) so v has the same per-round trajectory the shared methods get
+            # from incoming_global -- enabling best-val selection + pooled/DeLong/Youden for the PERSONAL
+            # model from preds alone, with NO post-hoc per-node dump (each client writes its own live).
+            if self.method in ("ditto", "ditto_modulewise") and getattr(self, "eval_incoming_global", True):
+                try:
+                    self._track_personal_perround(fl_ctx, logical_round, deployed)
+                except Exception as e:
+                    self.log_warning(fl_ctx, f"[personal-perround] tracking failed: {e}")
+
             # --- package update for FedAvg (DXO/FLModel) ---
             # C2: send the FINAL-epoch local weights (captured pre-reload), NOT the best-val
             # checkpoint -- standard FedAvg/FedProx/FedBN expect the current round's local update.
@@ -1776,6 +1787,51 @@ class GMICFederatedExecutor(Executor):
                 json.dump(metrics, f, indent=2)
         except Exception as e:
             self.log_warning(fl_ctx, f"[incoming-global] metrics json failed: {e}")
+
+
+    def _track_personal_perround(self, fl_ctx: FLContext, round_idx, model):
+        """Per-round eval + pred dump of the DEPLOYED PERSONAL model (Ditto family) on val+test.
+
+        Mirrors _track_incoming_global, but for the personal model v (not the shared global), so the
+        personal model gets the SAME per-round trajectory the shared methods get from incoming_global.
+        That lets best-val selection + pooled/DeLong/Youden stats be computed for the PERSONAL model
+        from preds alone, with NO post-hoc per-node dump (we lack local access to every client; each
+        client's own executor writes these live during the run). Tagged '<method>_perround' and logged
+        under [personal-perround] to stay DISTINCT from the shared-global [incoming-global] stats.
+        """
+        client_name = fl_ctx.get_identity_name()
+        tag = f"{self.method}_perround"
+        metrics = {"client": client_name, "round": int(round_idx), "method": tag}
+        for split in ("val", "test"):
+            if not self.data_loader.get_data_for_split(split):
+                continue
+            core = self._evaluate_model(fl_ctx, split=split, model=model)
+            metrics[f"{split}_auc"] = float(core["auc"])
+            metrics[f"{split}_accuracy"] = float(core["accuracy"])
+            metrics[f"{split}_loss"] = float(core["loss"])
+            metrics[f"{split}_samples"] = int(core["samples"])
+            self.log_info(
+                fl_ctx,
+                f"[personal-perround] site={client_name} round={int(round_idx)} method={self.method} "
+                f"{split}_auc={core['auc']:.4f} n={core['samples']}"
+            )
+            try:
+                self._dump_predictions(fl_ctx, split=split, model=model,
+                                       round_idx=round_idx, method_tag=tag,
+                                       save_saliency=False)
+            except Exception as e:
+                self.log_warning(fl_ctx, f"[personal-perround] preds dump ({split}) failed: {e}")
+        # Durable per-round table (mirrors incoming-global), distinct filename.
+        try:
+            persistent_dir = getattr(self, 'results_dir', "/workspace/gmic_results")
+            os.makedirs(persistent_dir, exist_ok=True)
+            out = os.path.join(
+                persistent_dir,
+                f"{client_name}_{tag}_round{int(round_idx)}_metrics.json")
+            with open(out, "w") as f:
+                json.dump(metrics, f, indent=2)
+        except Exception as e:
+            self.log_warning(fl_ctx, f"[personal-perround] metrics json failed: {e}")
 
 
     def _dump_predictions(self, fl_ctx: FLContext, split, model, round_idx, method_tag,
