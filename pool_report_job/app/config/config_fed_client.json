@@ -7,9 +7,9 @@
         "id": "PoolReportExecutor",
         "path": "pool_report_executor.PoolReportExecutor",
         "args": {
-          "results_dir": "/workspace/data/processed/fedprox_mu0.1_3client_20260623",
+          "results_dir": "/workspace/data/processed/ditto_l0.05_3client_20260623",
           "task_name": "pool_report",
-          "methods": ["incoming_global", "pretrained_baseline"]
+          "methods": ["incoming_global", "pretrained_baseline", "ditto_perround"]
         }
       }
     }
