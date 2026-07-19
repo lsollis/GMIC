@@ -1200,6 +1200,45 @@ class GMICFederatedExecutor(Executor):
         reply.set_return_code(ReturnCode.OK)
         return reply
 
+    @staticmethod
+    def _unwrap_state_dict(sd):
+        """Tolerate a {'model'/'state_dict': sd} wrapper; our savers write a flat dict."""
+        if isinstance(sd, dict) and not any(torch.is_tensor(v) for v in sd.values()):
+            for wrap in ("model", "state_dict", "model_dict"):
+                if isinstance(sd.get(wrap), dict):
+                    return sd[wrap]
+        return sd
+
+    def _restore_personal_model(self, fl_ctx: FLContext):
+        """Crash-resume: reload the Ditto personal model v from its round-N checkpoint.
+
+        `_save_local_model` persists the DEPLOYED model, which for Ditto-family IS v, so
+        `{client}_gmic_model_round_{N}.pth` is exactly the state to restore (the same file the
+        shared-model methods use for their global reseed -- hence the method-dependent split in
+        _reseed_round). Raises rather than falling back to the pretrained init: a silent cold v
+        is the precise failure this exists to prevent, and it would not be visible in the logs.
+
+        The v optimizer's Adam moment estimates were never persisted and cannot be recovered; the
+        caller rebuilds them fresh, which re-warms within a few steps on an already-warm model.
+        """
+        client_name = fl_ctx.get_identity_name()
+        round_n = int(self.resume_from_local_round)
+        ckpt_dir = self.resume_ckpt_dir or self.results_dir
+        ckpt = os.path.join(ckpt_dir, f"{client_name}_gmic_model_round_{round_n}.pth")
+        if not os.path.exists(ckpt):
+            raise FileNotFoundError(
+                f"[resume] personal model checkpoint not found for {client_name}: {ckpt} "
+                f"(refusing to restart Ditto's personal model v from the pretrained init on a "
+                f"resumed run -- that would desynchronize v from the round-{round_n} global)")
+        sd = self._unwrap_state_dict(torch.load(ckpt, map_location=self.device, weights_only=False))
+        load_res = self._v_model.load_state_dict(sd, strict=False)
+        self.log_info(
+            fl_ctx,
+            f"[resume] restored personal model v <- {ckpt} "
+            f"(missing={len(load_res.missing_keys)} unexpected={len(load_res.unexpected_keys)}); "
+            f"v optimizer state rebuilt fresh (never persisted)"
+        )
+
     def _reseed_round(self, fl_ctx: FLContext, shareable: Shareable) -> Shareable:
         """Resumed-job round 0: submit this client's cached round-N weights UNTRAINED.
 
@@ -1215,17 +1254,24 @@ class GMICFederatedExecutor(Executor):
         client_name = fl_ctx.get_identity_name()
         round_n = int(self.resume_from_local_round)
         ckpt_dir = self.resume_ckpt_dir or self.results_dir
-        ckpt = os.path.join(ckpt_dir, f"{client_name}_gmic_model_round_{round_n}.pth")
+        # WHICH file holds the shared global w^N is method-dependent. For the shared-model methods
+        # the deployed model IS w, so the plain round checkpoint is the aggregation contribution.
+        # For Ditto-family the deployed (and therefore saved) model is the PERSONAL model v --
+        # re-aggregating three sites' personal models would yield a meaningless "global" -- so read
+        # the SENT-global trajectory cache instead, which is exactly w^N (requires
+        # cache_global_trajectory, which the Ditto runs set).
+        if self.method in ("ditto", "ditto_modulewise"):
+            ckpt = os.path.join(ckpt_dir, "global_trajectory",
+                                f"{client_name}_global_round_{round_n}.pth")
+            what = f"sent global w^{round_n} (Ditto-family: deployed ckpt is the personal v, not w)"
+        else:
+            ckpt = os.path.join(ckpt_dir, f"{client_name}_gmic_model_round_{round_n}.pth")
+            what = f"round-{round_n} deployed global"
         if not os.path.exists(ckpt):
-            raise FileNotFoundError(f"[resume] cached checkpoint not found for {client_name}: {ckpt}")
+            raise FileNotFoundError(
+                f"[resume] cached checkpoint not found for {client_name}: {ckpt} (expected the {what})")
 
-        sd = torch.load(ckpt, map_location=self.device, weights_only=False)
-        # tolerate a {'model'/'state_dict': sd} wrapper; _save_local_model writes a flat dict
-        if isinstance(sd, dict) and not any(torch.is_tensor(v) for v in sd.values()):
-            for wrap in ("model", "state_dict", "model_dict"):
-                if isinstance(sd.get(wrap), dict):
-                    sd = sd[wrap]
-                    break
+        sd = self._unwrap_state_dict(torch.load(ckpt, map_location=self.device, weights_only=False))
         load_res = self._underlying.load_state_dict(sd, strict=False)
         self.log_info(
             fl_ctx,
@@ -1668,6 +1714,13 @@ class GMICFederatedExecutor(Executor):
         # Lazily create the Ditto personal model v ONCE, from the (pretrained) w.
         if method in ("ditto", "ditto_modulewise") and self._v_model is None:
             self._v_model = copy.deepcopy(self._underlying).to(self.device)
+            # Crash-resume: v PERSISTS across rounds and is never re-derived from the global, so a
+            # resumed segment MUST reload it -- otherwise the run carries a warm round-N global but
+            # a personal model restarted from the pretrained init, silently desynchronizing the two
+            # trajectories by N rounds. Restored here (not in _reseed_round) because the reseed
+            # short-circuits before _consume_global, so v is first created on the next round.
+            if self.resume_from_local_round >= 0:
+                self._restore_personal_model(fl_ctx)
             try:
                 opt, _, _ = configure_optimizers(self._v_model, self._opt_args)
             except Exception as e:
