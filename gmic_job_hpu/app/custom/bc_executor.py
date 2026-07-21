@@ -290,6 +290,10 @@ class GMICFederatedExecutor(Executor):
             self.grad_accumulation = max(1, grad_accumulation)
             self.memory_efficient = memory_efficient
             self._scaler = torch.cuda.amp.GradScaler(enabled=self.use_amp) if torch.cuda.is_available() else None
+            # Separate scaler for the Ditto personal pass: v has its OWN optimizer, and a scaler's
+            # scale factor / inf-tracking is per-optimizer-step, so sharing one across both passes
+            # would let a skipped step in one pass perturb the other's scale schedule.
+            self._v_scaler = torch.cuda.amp.GradScaler(enabled=self.use_amp) if torch.cuda.is_available() else None
             self.pre_train_task_name = pre_train_task_name
             self.train_task_name = train_task_name
             self.submit_model_task_name = submit_model_task_name
@@ -1230,7 +1234,9 @@ class GMICFederatedExecutor(Executor):
                 f"[resume] personal model checkpoint not found for {client_name}: {ckpt} "
                 f"(refusing to restart Ditto's personal model v from the pretrained init on a "
                 f"resumed run -- that would desynchronize v from the round-{round_n} global)")
-        sd = self._unwrap_state_dict(torch.load(ckpt, map_location=self.device, weights_only=False))
+        # map_location="cpu": load_state_dict copies to the module's device anyway, so staging the
+        # checkpoint on the GPU only adds a transient full-model allocation on an already-tight card.
+        sd = self._unwrap_state_dict(torch.load(ckpt, map_location="cpu", weights_only=False))
         load_res = self._v_model.load_state_dict(sd, strict=False)
         self.log_info(
             fl_ctx,
@@ -1271,7 +1277,7 @@ class GMICFederatedExecutor(Executor):
             raise FileNotFoundError(
                 f"[resume] cached checkpoint not found for {client_name}: {ckpt} (expected the {what})")
 
-        sd = self._unwrap_state_dict(torch.load(ckpt, map_location=self.device, weights_only=False))
+        sd = self._unwrap_state_dict(torch.load(ckpt, map_location="cpu", weights_only=False))
         load_res = self._underlying.load_state_dict(sd, strict=False)
         self.log_info(
             fl_ctx,
@@ -1736,8 +1742,15 @@ class GMICFederatedExecutor(Executor):
 
         v and its optimizer are instance attributes that persist across rounds; v is
         never reset to the global. lambda is a scalar (ditto) or a per-group dict
-        (ditto_modulewise: {global, local, fusion}). Runs in plain fp32 (no AMP) for
-        simplicity/correctness — this is the deployed model, not the comms payload.
+        (ditto_modulewise: {global, local, fusion}).
+
+        Precision follows `use_amp`, exactly like the main w pass. This pass used to run plain
+        fp32 while the main pass ran under autocast, which made it need ~2x the activation memory
+        of the pass right before it -- the deployed model was the single most expensive thing in
+        the round. That is a hard hardware floor, not a tuning knob: at batch 32 / 2944x1920 it
+        OOMs on 16GB- and 24GB-class cards (T4, L4) and only fits on A100-class memory. Following
+        use_amp also makes v numerically consistent with every shared global in the study, all of
+        which have always trained under autocast.
         """
         v = self._v_model
         opt = self._v_optimizer
@@ -1745,7 +1758,20 @@ class GMICFederatedExecutor(Executor):
             self.log_warning(fl_ctx, "[ditto] personal model/ref not ready; skipping personal pass")
             return
         lam = self.ditto_lambda if self.method == "ditto" else self.lam_dict
-        self.log_info(fl_ctx, f"[ditto] personal pass: epochs={self.epochs} lambda={lam}")
+        scaler = getattr(self, "_v_scaler", None)
+        self.log_info(fl_ctx, f"[ditto] personal pass: epochs={self.epochs} lambda={lam} "
+                              f"amp={bool(self.use_amp)}")
+        # The main loop has just filled the caching allocator; hand the reserve back before this
+        # pass allocates its own activations. Purely an allocator hint -- it frees nothing live
+        # and does not change the math.
+        if self.memory_efficient and torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            self.log_info(
+                fl_ctx,
+                f"[ditto] pre-personal-pass cache release: "
+                f"{torch.cuda.memory_allocated() / 2**30:.2f} GiB allocated / "
+                f"{torch.cuda.memory_reserved() / 2**30:.2f} GiB reserved"
+            )
         v.train()
         for epoch in range(self.epochs):
             if abort_signal.triggered:
@@ -1757,20 +1783,32 @@ class GMICFederatedExecutor(Executor):
                 inputs = inputs.to(self.device)
                 targets = targets.to(self.device)
                 opt.zero_grad(set_to_none=True)
-                outputs = v(inputs)
+                amp_device = "cuda" if "cuda" in str(self.device) else "cpu"
+                with torch.autocast(device_type=amp_device, enabled=self.use_amp):
+                    outputs = v(inputs)
+                # Loss OUTSIDE autocast, in fp32 -- same reason as the main loop: the GMIC heads
+                # emit already-sigmoided probabilities and F.binary_cross_entropy is unsafe under
+                # autocast. The proximal term reads v's fp32 master weights, so it is fp32 too.
                 loss = self._compute_task_loss(outputs, targets)
                 loss = loss + proximal_penalty(v, self._global_ref, lam)
-                # Stability guard: the personal pass runs in fp32 with no AMP GradScaler, so unlike
-                # the main loop it has no built-in inf/nan-skip. The personal model v PERSISTS across
-                # rounds, so a single non-finite step would poison it for the whole run (-> NaN val
-                # AUC -> reported as 0.0). Skip non-finite losses and clip grads so extreme lambdas
-                # can't silently zero a site.
+                # Stability guard: v PERSISTS across rounds, so a single non-finite step would
+                # poison it for the whole run (-> NaN val AUC -> reported as 0.0). Two layers:
+                # this check skips a non-finite LOSS, and (under AMP) scaler.step additionally
+                # skips the update on non-finite GRADIENTS, which the loss check cannot see.
                 if not torch.isfinite(loss):
                     self.log_warning(fl_ctx, f"[ditto] non-finite personal loss (epoch {epoch + 1}); skipping step")
                     continue
-                loss.backward()
-                torch.nn.utils.clip_grad_norm_(v.parameters(), max_norm=5.0)
-                opt.step()
+                if scaler is not None and self.use_amp:
+                    scaler.scale(loss).backward()
+                    # unscale BEFORE clipping so max_norm applies to true (unscaled) gradients.
+                    scaler.unscale_(opt)
+                    torch.nn.utils.clip_grad_norm_(v.parameters(), max_norm=5.0)
+                    scaler.step(opt)
+                    scaler.update()
+                else:
+                    loss.backward()
+                    torch.nn.utils.clip_grad_norm_(v.parameters(), max_norm=5.0)
+                    opt.step()
                 n_batches += 1
             self.log_info(fl_ctx, f"[ditto] personal epoch {epoch + 1}/{self.epochs} done ({n_batches} batches)")
 
