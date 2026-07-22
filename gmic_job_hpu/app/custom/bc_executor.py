@@ -177,6 +177,12 @@ class GMICFederatedExecutor(Executor):
             # stalled read -- which is exactly when per-batch logging goes silent. Logs only;
             # never aborts, so a slow-but-healthy site is never killed. 0/None disables.
             heartbeat_interval_s: int = 300,
+            # Diagnostic: torch.cuda.synchronize() after each stage of the Ditto personal step.
+            # CUDA launches are async, so without this the heartbeat's `stage` names the first
+            # SYNC POINT the CPU reaches, not the op that actually wedged -- e.g. a stuck backward
+            # surfaces as stage=step because scaler.step is the first thing that waits. Costs the
+            # CPU/GPU overlap (negligible here: the pass is compute-bound) and is off by default.
+            stage_sync: bool = False,
             log_lr_each_epoch: bool = False,
             tb_log_dir: str | None = None,
             disable_tensorboard: bool = False,
@@ -288,6 +294,7 @@ class GMICFederatedExecutor(Executor):
             self.load_checkpoint = load_checkpoint
             self.train_log_batch_interval = train_log_batch_interval
             self.heartbeat_interval_s = int(heartbeat_interval_s or 0)
+            self.stage_sync = bool(stage_sync)
             self.log_lr_each_epoch = log_lr_each_epoch
             self.tb_log_dir = tb_log_dir
             self.disable_tensorboard = disable_tensorboard
@@ -1751,6 +1758,15 @@ class GMICFederatedExecutor(Executor):
             self.log_info(fl_ctx, "[ditto] initialized personal model v from pretrained init (persists across rounds)")
 
 
+    def _sync(self):
+        """Wait for queued GPU work, so the CURRENT stage label is the one that wedged.
+
+        Call AFTER an op while `stage` still names it: if the sync blocks, the heartbeat reports
+        that op rather than the next sync point. No-op unless stage_sync is set (and off CUDA).
+        """
+        if getattr(self, "stage_sync", False) and torch.cuda.is_available():
+            torch.cuda.synchronize()
+
     @staticmethod
     def _cuda_mem_str():
         """allocated/reserved/peak, for logs. Empty string off-CUDA so callers stay unconditional."""
@@ -1828,7 +1844,7 @@ class GMICFederatedExecutor(Executor):
         lam = self.ditto_lambda if self.method == "ditto" else self.lam_dict
         scaler = getattr(self, "_v_scaler", None)
         self.log_info(fl_ctx, f"[ditto] personal pass: epochs={self.epochs} lambda={lam} "
-                              f"amp={bool(self.use_amp)}")
+                              f"amp={bool(self.use_amp)} stage_sync={bool(self.stage_sync)}")
         # The main loop has just filled the caching allocator; hand the reserve back before this
         # pass allocates its own activations. Purely an allocator hint -- it frees nothing live
         # and does not change the math.
@@ -1868,6 +1884,7 @@ class GMICFederatedExecutor(Executor):
                     state["stage"] = "forward"
                     with torch.autocast(device_type=amp_device, enabled=self.use_amp):
                         outputs = v(inputs)
+                    self._sync()
                     # Loss OUTSIDE autocast, in fp32 -- same reason as the main loop: the GMIC
                     # heads emit already-sigmoided probabilities and F.binary_cross_entropy is
                     # unsafe under autocast. The proximal term reads v's fp32 master weights,
@@ -1887,20 +1904,34 @@ class GMICFederatedExecutor(Executor):
                             f"batch {batch_idx}); skipping step")
                         state["t_last_progress"] = time.time()
                         continue
+                    # Each AMP call gets its own stage: these are precisely the calls that did NOT
+                    # exist in the fp32 personal pass, so a hang here must name which one.
                     state["stage"] = "backward"
                     if scaler is not None and self.use_amp:
                         scaler.scale(loss).backward()
+                        self._sync()
                         # unscale BEFORE clipping so max_norm applies to true (unscaled) gradients.
+                        state["stage"] = "unscale"
                         scaler.unscale_(opt)
+                        self._sync()
+                        state["stage"] = "clip"
                         torch.nn.utils.clip_grad_norm_(v.parameters(), max_norm=5.0)
+                        self._sync()
                         state["stage"] = "step"
                         scaler.step(opt)
+                        self._sync()
+                        state["stage"] = "scaler-update"
                         scaler.update()
+                        self._sync()
                     else:
                         loss.backward()
+                        self._sync()
+                        state["stage"] = "clip"
                         torch.nn.utils.clip_grad_norm_(v.parameters(), max_norm=5.0)
+                        self._sync()
                         state["stage"] = "step"
                         opt.step()
+                        self._sync()
                     n_batches += 1
                     state["stage"] = "load"  # back to waiting on the iterator for the next batch
                     state["t_last_progress"] = time.time()

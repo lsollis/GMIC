@@ -11,6 +11,7 @@
 #
 # Run from gmic_job_hpu/app/custom/:   python -m pytest test_ditto_amp_personal.py -q
 # ============================================================================
+import contextlib
 import copy
 import tempfile
 from unittest import mock
@@ -122,6 +123,61 @@ def test_personal_forward_is_fp32_when_amp_off():
         assert all(d == torch.float32 for d in dtypes), \
             f"use_amp=False personal forward was not fp32 (got {set(dtypes)})"
     print("[amp] personal forward is fp32 when use_amp=False. OK")
+
+
+def test_stage_sync_does_not_change_training():
+    """stage_sync only inserts torch.cuda.synchronize(); v must still train identically.
+
+    Guards the diagnostic against becoming a behavior change: syncing is a scheduling barrier,
+    never a numerical one, so the same seed must give the same v.
+    """
+    probes = {}
+    for flag in (False, True):
+        with tempfile.TemporaryDirectory() as td:
+            torch.manual_seed(1234)
+            ex = make_executor("ditto_modulewise", td, use_amp=True, stage_sync=flag)
+            torch.manual_seed(1234)
+            run_round(ex, GMIC(copy.deepcopy(GMIC_PARAMS)), round_idx=0, total_rounds=1)
+            probes[flag] = _v_probe(ex)
+    assert torch.allclose(probes[False], probes[True], atol=1e-6), \
+        "stage_sync altered v -- a diagnostic must not change the math"
+    print("[amp] stage_sync is behavior-neutral. OK")
+
+
+def test_personal_pass_stages_are_granular_under_amp():
+    """The AMP-only calls must each be individually nameable when something wedges.
+
+    A hang inside scaler.unscale_ vs clip vs scaler.step is the exact question we cannot answer
+    today, so these must be distinct stages rather than one lumped 'step'.
+    """
+    import bc_executor as BE
+    seen, holder = [], {}
+    real_hb = BE.GMICFederatedExecutor._heartbeat
+
+    @contextlib.contextmanager
+    def capturing_hb(self, label, state):
+        holder["state"] = state  # the dict the loop mutates; read after each _sync
+        with real_hb(self, label, state) as s:
+            yield s
+
+    with tempfile.TemporaryDirectory() as td:
+        # The AMP branch is gated on `scaler is not None`, and the scaler is only built when CUDA
+        # is available -- so on a CPU-only box the fp32 branch would run and the AMP-only stages
+        # would never appear. Fake CUDA for construction: PyTorch then builds a GradScaler that
+        # self-disables (no CUDA), which is exactly the pass-through we want for a label test.
+        with mock.patch.object(torch.cuda, "is_available", return_value=True):
+            ex = make_executor("ditto_modulewise", td, use_amp=True, heartbeat_interval_s=0)
+        assert ex._v_scaler is not None
+        real_sync = ex._sync
+        ex._sync = lambda: (seen.append(holder.get("state", {}).get("stage")), real_sync())[1]
+        BE.GMICFederatedExecutor._heartbeat = capturing_hb
+        try:
+            run_round(ex, GMIC(copy.deepcopy(GMIC_PARAMS)), round_idx=0, total_rounds=1)
+        finally:
+            BE.GMICFederatedExecutor._heartbeat = real_hb
+    for expected in ("forward", "backward", "unscale", "clip", "step", "scaler-update"):
+        assert expected in seen, f"stage '{expected}' is not separately observable; got {set(seen)}"
+    print(f"[amp] personal step exposes granular stages: {sorted(set(x for x in seen if x))}. OK")
 
 
 def test_fp32_personal_pass_still_supported():
