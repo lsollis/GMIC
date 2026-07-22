@@ -7,7 +7,10 @@ import csv
 import copy
 import json
 import math
+import time
 import logging
+import threading
+import contextlib
 
 import torch
 import torch.nn as nn
@@ -169,6 +172,11 @@ class GMICFederatedExecutor(Executor):
             load_checkpoint: str = "",
             # Logging / TensorBoard
             train_log_batch_interval: int = 5,
+            # Background heartbeat (seconds) for long phases: a watchdog THREAD logs where the
+            # round is stuck even while the main thread is blocked inside a CUDA kernel or a
+            # stalled read -- which is exactly when per-batch logging goes silent. Logs only;
+            # never aborts, so a slow-but-healthy site is never killed. 0/None disables.
+            heartbeat_interval_s: int = 300,
             log_lr_each_epoch: bool = False,
             tb_log_dir: str | None = None,
             disable_tensorboard: bool = False,
@@ -279,6 +287,7 @@ class GMICFederatedExecutor(Executor):
             self.pretrained_model_index = pretrained_model_index
             self.load_checkpoint = load_checkpoint
             self.train_log_batch_interval = train_log_batch_interval
+            self.heartbeat_interval_s = int(heartbeat_interval_s or 0)
             self.log_lr_each_epoch = log_lr_each_epoch
             self.tb_log_dir = tb_log_dir
             self.disable_tensorboard = disable_tensorboard
@@ -1638,9 +1647,14 @@ class GMICFederatedExecutor(Executor):
         model (e.g. the Ditto personal model v) to evaluate it instead.
         """
         eval_model = model if model is not None else self.model
-        core = evaluate_model(eval_model, self.data_loader, self.criterion, self.device,
-                              split=split, decision_threshold=self.decision_threshold,
-                              eval_threshold_sweep=self.eval_threshold_sweep)
+        # evaluate_model is one opaque call with no internal logging, so a stall inside it is
+        # invisible. The heartbeat keeps reporting from a blocked state (log-only, never aborts).
+        t0 = time.time()
+        with self._heartbeat("evaluate", {"site": fl_ctx.get_identity_name(), "split": split,
+                                          "t_last_progress": t0}):
+            core = evaluate_model(eval_model, self.data_loader, self.criterion, self.device,
+                                  split=split, decision_threshold=self.decision_threshold,
+                                  eval_threshold_sweep=self.eval_threshold_sweep)
         out = {
             "auc": float(core["auc"]),
             "accuracy": float(core["accuracy"]),
@@ -1737,6 +1751,60 @@ class GMICFederatedExecutor(Executor):
             self.log_info(fl_ctx, "[ditto] initialized personal model v from pretrained init (persists across rounds)")
 
 
+    @staticmethod
+    def _cuda_mem_str():
+        """allocated/reserved/peak, for logs. Empty string off-CUDA so callers stay unconditional."""
+        if not torch.cuda.is_available():
+            return ""
+        return (f"mem {torch.cuda.memory_allocated() / 2**30:.2f}/"
+                f"{torch.cuda.memory_reserved() / 2**30:.2f}/"
+                f"{torch.cuda.max_memory_allocated() / 2**30:.2f} GiB alloc/resv/peak")
+
+    @contextlib.contextmanager
+    def _heartbeat(self, label, state):
+        """Background thread that logs `label` + `state` every heartbeat_interval_s.
+
+        Exists because per-batch logging goes silent in exactly the situation you most need it:
+        when the main thread is blocked inside a CUDA kernel, a stalled mount read, or a wedged
+        driver. A separate thread keeps emitting, so a remote site that cannot be shelled into
+        still shows WHERE it stopped and for how long -- the difference between "slow" and "hung"
+        without touching the box.
+
+        Logs only; it never aborts or raises, so a slow-but-healthy site is never killed. `state`
+        is a mutable dict the caller updates (e.g. {"batch": i}); it is read, not written, here.
+
+        Uses self._logger directly rather than log_info(fl_ctx): FLContext is not documented as
+        thread-safe, and a diagnostic must never be able to destabilize the run it is observing.
+        """
+        interval = int(getattr(self, "heartbeat_interval_s", 0) or 0)
+        if interval <= 0:
+            yield state
+            return
+        who = state.get("site", "?")
+        stop = threading.Event()
+        started = time.time()
+
+        def _beat():
+            while not stop.wait(interval):
+                now = time.time()
+                since = now - float(state.get("t_last_progress", started))
+                self._logger.warning(
+                    "[heartbeat] site=%s %s: %s | %.0fs since last progress, %.0fs in phase | %s "
+                    "(no output between beats means the phase is blocked, not idle)",
+                    who, label,
+                    " ".join(f"{k}={v}" for k, v in state.items()
+                             if k not in ("site", "t_last_progress")),
+                    since, now - started, self._cuda_mem_str(),
+                )
+
+        t = threading.Thread(target=_beat, name=f"hb-{label}", daemon=True)
+        t.start()
+        try:
+            yield state
+        finally:
+            stop.set()
+            t.join(timeout=5)
+
     def _train_personal_model(self, fl_ctx: FLContext, abort_signal: Signal):
         """Ditto personal pass: train v for self.epochs with task_loss(v) + proximal(v, w_ref).
 
@@ -1773,44 +1841,85 @@ class GMICFederatedExecutor(Executor):
                 f"{torch.cuda.memory_reserved() / 2**30:.2f} GiB reserved"
             )
         v.train()
+        client_name = fl_ctx.get_identity_name()
         for epoch in range(self.epochs):
             if abort_signal.triggered:
                 break
             n_batches = 0
-            for inputs, targets, metadata in self.data_loader.get_batch_iterator('train'):
-                if abort_signal.triggered:
-                    break
-                inputs = inputs.to(self.device)
-                targets = targets.to(self.device)
-                opt.zero_grad(set_to_none=True)
-                amp_device = "cuda" if "cuda" in str(self.device) else "cpu"
-                with torch.autocast(device_type=amp_device, enabled=self.use_amp):
-                    outputs = v(inputs)
-                # Loss OUTSIDE autocast, in fp32 -- same reason as the main loop: the GMIC heads
-                # emit already-sigmoided probabilities and F.binary_cross_entropy is unsafe under
-                # autocast. The proximal term reads v's fp32 master weights, so it is fp32 too.
-                loss = self._compute_task_loss(outputs, targets)
-                loss = loss + proximal_penalty(v, self._global_ref, lam)
-                # Stability guard: v PERSISTS across rounds, so a single non-finite step would
-                # poison it for the whole run (-> NaN val AUC -> reported as 0.0). Two layers:
-                # this check skips a non-finite LOSS, and (under AMP) scaler.step additionally
-                # skips the update on non-finite GRADIENTS, which the loss check cannot see.
-                if not torch.isfinite(loss):
-                    self.log_warning(fl_ctx, f"[ditto] non-finite personal loss (epoch {epoch + 1}); skipping step")
-                    continue
-                if scaler is not None and self.use_amp:
-                    scaler.scale(loss).backward()
-                    # unscale BEFORE clipping so max_norm applies to true (unscaled) gradients.
-                    scaler.unscale_(opt)
-                    torch.nn.utils.clip_grad_norm_(v.parameters(), max_norm=5.0)
-                    scaler.step(opt)
-                    scaler.update()
-                else:
-                    loss.backward()
-                    torch.nn.utils.clip_grad_norm_(v.parameters(), max_norm=5.0)
-                    opt.step()
-                n_batches += 1
-            self.log_info(fl_ctx, f"[ditto] personal epoch {epoch + 1}/{self.epochs} done ({n_batches} batches)")
+            n_skipped = 0
+            t_epoch = time.time()
+            # batch=-1 + stage=load means we never got the FIRST batch out of the data loader --
+            # that alone separates an I/O/loader stall from a compute stall, without a shell on
+            # the box. `stage` then narrows a compute stall to the exact operation.
+            state = {"site": client_name, "epoch": f"{epoch + 1}/{self.epochs}", "batch": -1,
+                     "stage": "load", "t_last_progress": t_epoch}
+            with self._heartbeat("ditto-personal", state):
+                for batch_idx, (inputs, targets, metadata) in enumerate(
+                        self.data_loader.get_batch_iterator('train')):
+                    if abort_signal.triggered:
+                        break
+                    t_batch = time.time()
+                    state["batch"] = batch_idx
+                    state["stage"] = "h2d"
+                    inputs = inputs.to(self.device)
+                    targets = targets.to(self.device)
+                    opt.zero_grad(set_to_none=True)
+                    amp_device = "cuda" if "cuda" in str(self.device) else "cpu"
+                    state["stage"] = "forward"
+                    with torch.autocast(device_type=amp_device, enabled=self.use_amp):
+                        outputs = v(inputs)
+                    # Loss OUTSIDE autocast, in fp32 -- same reason as the main loop: the GMIC
+                    # heads emit already-sigmoided probabilities and F.binary_cross_entropy is
+                    # unsafe under autocast. The proximal term reads v's fp32 master weights,
+                    # so it is fp32 too.
+                    state["stage"] = "loss+prox"
+                    loss = self._compute_task_loss(outputs, targets)
+                    loss = loss + proximal_penalty(v, self._global_ref, lam)
+                    # Stability guard: v PERSISTS across rounds, so a single non-finite step would
+                    # poison it for the whole run (-> NaN val AUC -> reported as 0.0). Two layers:
+                    # this check skips a non-finite LOSS, and (under AMP) scaler.step additionally
+                    # skips the update on non-finite GRADIENTS, which the loss check cannot see.
+                    if not torch.isfinite(loss):
+                        n_skipped += 1
+                        self.log_warning(
+                            fl_ctx,
+                            f"[ditto] non-finite personal loss (epoch {epoch + 1} "
+                            f"batch {batch_idx}); skipping step")
+                        state["t_last_progress"] = time.time()
+                        continue
+                    state["stage"] = "backward"
+                    if scaler is not None and self.use_amp:
+                        scaler.scale(loss).backward()
+                        # unscale BEFORE clipping so max_norm applies to true (unscaled) gradients.
+                        scaler.unscale_(opt)
+                        torch.nn.utils.clip_grad_norm_(v.parameters(), max_norm=5.0)
+                        state["stage"] = "step"
+                        scaler.step(opt)
+                        scaler.update()
+                    else:
+                        loss.backward()
+                        torch.nn.utils.clip_grad_norm_(v.parameters(), max_norm=5.0)
+                        state["stage"] = "step"
+                        opt.step()
+                    n_batches += 1
+                    state["stage"] = "load"  # back to waiting on the iterator for the next batch
+                    state["t_last_progress"] = time.time()
+                    # Per-batch progress, mirroring the main loop's train_log_batch_interval. The
+                    # personal pass used to log NOTHING until the epoch ended, which made a stall
+                    # indistinguishable from normal work on a site we cannot shell into. Elapsed
+                    # is included so "slow" is quantifiable, not just "not finished yet".
+                    if self.train_log_batch_interval and (batch_idx % self.train_log_batch_interval == 0):
+                        self.log_info(
+                            fl_ctx,
+                            f"[ditto] personal epoch {epoch + 1} batch {batch_idx} "
+                            f"loss {loss.item():.4f} ({time.time() - t_batch:.1f}s) "
+                            f"{self._cuda_mem_str()}")
+            dt = time.time() - t_epoch
+            self.log_info(
+                fl_ctx,
+                f"[ditto] personal epoch {epoch + 1}/{self.epochs} done ({n_batches} batches, "
+                f"{n_skipped} skipped non-finite, {dt:.1f}s total, "
+                f"{dt / max(n_batches, 1):.1f}s/batch)")
 
 
     def _dump_baseline(self, fl_ctx: FLContext):
