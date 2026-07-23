@@ -4,14 +4,13 @@
 
 import os
 
-# Allocator config MUST be set before the CUDA caching allocator initializes (first CUDA
-# tensor). PyTorch reads PYTORCH_CUDA_ALLOC_CONF lazily on that first allocation, and this module
-# is imported before initialize() moves any model to the GPU, so setting it here usually wins the
-# race -- letting us test the expandable_segments fix WITHOUT container-env access (deploy = git
-# pull). expandable_segments defragments the reserve, targeting the HPU round-1 personal-pass hang
-# whose one distinguishing feature is ~6 GiB of fragmented reserved memory. setdefault: a real
-# container env var still overrides. We log the effective value at init so the log confirms it took.
-os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+# NOTE: we intentionally do NOT force PYTORCH_CUDA_ALLOC_CONF=expandable_segments here.
+# It was tried as a fragmentation fix, but "device not ready" driver faults on HPU's A4000
+# (driver 595.97) correlated exactly with expandable_segments being ON -- the only config that
+# ever ran clean on that card (the original mw run, to round 20) had it OFF. expandable_segments
+# uses the driver's virtual-memory API and is flaky on some GPU/driver combos; leave it off.
+# With per-site precision, no site needs it: HPU runs fp32 (fits its 16 GiB natively) and
+# RSNA/UHCC run fp16 (ample headroom). A container env var can still opt in if ever needed.
 import csv
 import copy
 import json

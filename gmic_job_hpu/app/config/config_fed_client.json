@@ -50,7 +50,7 @@
           "pretrained_weights_path": "/workspace/models/sample_model_5.p",
 
           "train_log_batch_interval": 1,
-          "stage_sync": true,
+          "stage_sync": false,
           "log_lr_each_epoch": true,
           "tb_log_dir": "/workspace/tb_logs_ditto_mw_g0.01_l0.5_f0_amp_3client_20260721",
           "disable_tensorboard": false,
