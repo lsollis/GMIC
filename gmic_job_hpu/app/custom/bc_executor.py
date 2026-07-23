@@ -202,9 +202,17 @@ class GMICFederatedExecutor(Executor):
             # Multi-GPU & memory optimization
             use_amp: bool = False,
             # Ditto personal-pass precision, independent of use_amp. None => follow use_amp.
-            # False => force fp32 personal pass (the A100-validated recipe) while the main pass
-            # keeps AMP -- the one-line revert if AMP can't run the personal pass on a given card.
+            # False => force fp32 personal pass (the recipe that ran 20+ rounds on HPU's A4000)
+            # while the main pass keeps AMP.
             personal_amp: bool | None = None,
+            # PER-SITE override map, e.g. {"HPU": false}. A site listed here uses that precision for
+            # its personal pass; sites not listed fall back to personal_amp/use_amp. Resolved from
+            # the FL identity at runtime, so ONE config deployed to all sites gives HPU fp32 (its
+            # A4000 faults on the fp16 backward) while RSNA/UHCC keep AMP -- no per-site app copies,
+            # and no need to move a site to an A100. The sites genuinely conflict: HPU's fp32
+            # footprint fits its 16 GiB card but fp16 faults there; RSNA's fp32 footprint OOMs a
+            # small card so it needs AMP -- one global precision cannot satisfy both.
+            personal_amp_by_site: dict | None = None,
             grad_accumulation: int = 1,
             memory_efficient: bool = False,
             pre_train_task_name: str = AppConstants.TASK_GET_WEIGHTS,
@@ -316,19 +324,22 @@ class GMICFederatedExecutor(Executor):
             self.gpus = gpus
             self.debug_devices = debug_devices
             self.use_amp = use_amp
-            # Personal-pass precision, DECOUPLED from the main pass. None => follow use_amp (the
-            # default). Set False to force the Ditto personal pass back to plain fp32 while the main
-            # pass keeps AMP -- i.e. the exact recipe that ran 20 clean rounds on the A100. This is
-            # the one-line revert path if the AMP personal pass can't be made to run on HPU's card:
-            # flip personal_amp=false in the config, keep everything else (resume, logging) intact.
-            self._personal_amp = self.use_amp if personal_amp is None else bool(personal_amp)
+            # Personal-pass precision, DECOUPLED from the main pass. The GLOBAL default (None =>
+            # follow use_amp) plus a per-site override map. The effective value for THIS site is
+            # resolved lazily once the FL identity is known (_resolve_personal_amp), so a single
+            # config can run HPU fp32 while RSNA/UHCC run AMP. _personal_amp holds the provisional
+            # default until then.
+            self._personal_amp_default = self.use_amp if personal_amp is None else bool(personal_amp)
+            self._personal_amp_by_site = dict(personal_amp_by_site or {})
+            self._personal_amp = self._personal_amp_default
+            self._personal_amp_resolved = False
             self.grad_accumulation = max(1, grad_accumulation)
             self.memory_efficient = memory_efficient
             self._scaler = torch.cuda.amp.GradScaler(enabled=self.use_amp) if torch.cuda.is_available() else None
             # Separate scaler for the Ditto personal pass: v has its OWN optimizer, and a scaler's
             # scale factor / inf-tracking is per-optimizer-step, so sharing one across both passes
             # would let a skipped step in one pass perturb the other's scale schedule. Built on the
-            # PERSONAL amp setting so personal_amp=false leaves it disabled (fp32 passthrough).
+            # provisional PERSONAL amp setting and rebuilt if the per-site resolution differs.
             self._v_scaler = torch.cuda.amp.GradScaler(enabled=self._personal_amp) if torch.cuda.is_available() else None
             self.pre_train_task_name = pre_train_task_name
             self.train_task_name = train_task_name
@@ -1880,6 +1891,28 @@ class GMICFederatedExecutor(Executor):
             stop.set()
             t.join(timeout=5)
 
+    def _resolve_personal_amp(self, fl_ctx: FLContext):
+        """Fix the personal-pass precision for THIS site, once, from the per-site override map.
+
+        Single config deployed to every site: the map (e.g. {"HPU": false}) lets HPU run its
+        personal pass in fp32 -- its A4000 faults on the fp16 backward -- while RSNA/UHCC keep AMP,
+        with no per-site app duplication and no forced A100 move. Rebuilds the v scaler to match the
+        resolved precision. Idempotent: resolves + logs exactly once.
+        """
+        if getattr(self, "_personal_amp_resolved", False):
+            return
+        site = fl_ctx.get_identity_name()
+        overridden = site in self._personal_amp_by_site
+        eff = bool(self._personal_amp_by_site.get(site, self._personal_amp_default))
+        if eff != self._personal_amp and torch.cuda.is_available():
+            self._v_scaler = torch.cuda.amp.GradScaler(enabled=eff)
+        self._personal_amp = eff
+        self._personal_amp_resolved = True
+        self.log_info(
+            fl_ctx,
+            f"[ditto] personal-pass precision for site={site}: amp={eff} "
+            f"({'per-site override' if overridden else 'default'}; main use_amp={bool(self.use_amp)})")
+
     def _train_personal_model(self, fl_ctx: FLContext, abort_signal: Signal):
         """Ditto personal pass: train v for self.epochs with task_loss(v) + proximal(v, w_ref).
 
@@ -1901,7 +1934,8 @@ class GMICFederatedExecutor(Executor):
             self.log_warning(fl_ctx, "[ditto] personal model/ref not ready; skipping personal pass")
             return
         lam = self.ditto_lambda if self.method == "ditto" else self.lam_dict
-        personal_amp = getattr(self, "_personal_amp", self.use_amp)
+        self._resolve_personal_amp(fl_ctx)  # per-site precision, once (fp32 for HPU, AMP elsewhere)
+        personal_amp = self._personal_amp
         scaler = getattr(self, "_v_scaler", None) if personal_amp else None
         self.log_info(fl_ctx, f"[ditto] personal pass: epochs={self.epochs} lambda={lam} "
                               f"amp={bool(personal_amp)} (main use_amp={bool(self.use_amp)}) "
