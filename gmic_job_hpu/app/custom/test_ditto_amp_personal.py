@@ -180,6 +180,33 @@ def test_personal_pass_stages_are_granular_under_amp():
     print(f"[amp] personal step exposes granular stages: {sorted(set(x for x in seen if x))}. OK")
 
 
+def test_personal_amp_false_forces_fp32_while_main_stays_amp():
+    """The A100 revert path: personal_amp=False must run v's forward in fp32 even with use_amp=True.
+
+    This is the one-line fallback if AMP can't run the personal pass on a given card -- the main
+    pass keeps AMP, the personal pass returns to the validated fp32 recipe. Asserts on the forward
+    dtypes so it tests actual precision, not just that a flag was stored.
+    """
+    with tempfile.TemporaryDirectory() as td:
+        ex = make_executor("ditto_modulewise", td, use_amp=True, personal_amp=False)
+        assert ex._personal_amp is False
+        dtypes = _personal_pass_output_dtypes(ex, GMIC(copy.deepcopy(GMIC_PARAMS)), False)
+        assert all(d == torch.float32 for d in dtypes), \
+            f"personal_amp=False still ran a non-fp32 forward (got {set(dtypes)})"
+    print("[amp] personal_amp=False forces fp32 while main keeps AMP. OK")
+
+
+def test_personal_amp_none_follows_use_amp():
+    """Default (None) must track use_amp so existing configs are unchanged."""
+    with tempfile.TemporaryDirectory() as td:
+        ex_amp = make_executor("ditto_modulewise", td, use_amp=True)  # personal_amp defaults None
+        assert ex_amp._personal_amp is True
+    with tempfile.TemporaryDirectory() as td:
+        ex_fp32 = make_executor("ditto_modulewise", td, use_amp=False)
+        assert ex_fp32._personal_amp is False
+    print("[amp] personal_amp=None follows use_amp. OK")
+
+
 def test_fp32_personal_pass_still_supported():
     """use_amp=False keeps the original fp32 path (sim jobs / A100 reruns are unaffected)."""
     with tempfile.TemporaryDirectory() as td:
@@ -214,6 +241,8 @@ if __name__ == "__main__":
     test_personal_pass_has_its_own_scaler()
     test_personal_forward_actually_runs_under_autocast()
     test_personal_forward_is_fp32_when_amp_off()
+    test_personal_amp_false_forces_fp32_while_main_stays_amp()
+    test_personal_amp_none_follows_use_amp()
     test_personal_pass_trains_under_amp()
     test_fp32_personal_pass_still_supported()
     test_nonfinite_loss_still_skips_step()

@@ -3,6 +3,15 @@
 # ============================================================================
 
 import os
+
+# Allocator config MUST be set before the CUDA caching allocator initializes (first CUDA
+# tensor). PyTorch reads PYTORCH_CUDA_ALLOC_CONF lazily on that first allocation, and this module
+# is imported before initialize() moves any model to the GPU, so setting it here usually wins the
+# race -- letting us test the expandable_segments fix WITHOUT container-env access (deploy = git
+# pull). expandable_segments defragments the reserve, targeting the HPU round-1 personal-pass hang
+# whose one distinguishing feature is ~6 GiB of fragmented reserved memory. setdefault: a real
+# container env var still overrides. We log the effective value at init so the log confirms it took.
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 import csv
 import copy
 import json
@@ -192,6 +201,10 @@ class GMICFederatedExecutor(Executor):
             debug_devices: bool = False,
             # Multi-GPU & memory optimization
             use_amp: bool = False,
+            # Ditto personal-pass precision, independent of use_amp. None => follow use_amp.
+            # False => force fp32 personal pass (the A100-validated recipe) while the main pass
+            # keeps AMP -- the one-line revert if AMP can't run the personal pass on a given card.
+            personal_amp: bool | None = None,
             grad_accumulation: int = 1,
             memory_efficient: bool = False,
             pre_train_task_name: str = AppConstants.TASK_GET_WEIGHTS,
@@ -303,13 +316,20 @@ class GMICFederatedExecutor(Executor):
             self.gpus = gpus
             self.debug_devices = debug_devices
             self.use_amp = use_amp
+            # Personal-pass precision, DECOUPLED from the main pass. None => follow use_amp (the
+            # default). Set False to force the Ditto personal pass back to plain fp32 while the main
+            # pass keeps AMP -- i.e. the exact recipe that ran 20 clean rounds on the A100. This is
+            # the one-line revert path if the AMP personal pass can't be made to run on HPU's card:
+            # flip personal_amp=false in the config, keep everything else (resume, logging) intact.
+            self._personal_amp = self.use_amp if personal_amp is None else bool(personal_amp)
             self.grad_accumulation = max(1, grad_accumulation)
             self.memory_efficient = memory_efficient
             self._scaler = torch.cuda.amp.GradScaler(enabled=self.use_amp) if torch.cuda.is_available() else None
             # Separate scaler for the Ditto personal pass: v has its OWN optimizer, and a scaler's
             # scale factor / inf-tracking is per-optimizer-step, so sharing one across both passes
-            # would let a skipped step in one pass perturb the other's scale schedule.
-            self._v_scaler = torch.cuda.amp.GradScaler(enabled=self.use_amp) if torch.cuda.is_available() else None
+            # would let a skipped step in one pass perturb the other's scale schedule. Built on the
+            # PERSONAL amp setting so personal_amp=false leaves it disabled (fp32 passthrough).
+            self._v_scaler = torch.cuda.amp.GradScaler(enabled=self._personal_amp) if torch.cuda.is_available() else None
             self.pre_train_task_name = pre_train_task_name
             self.train_task_name = train_task_name
             self.submit_model_task_name = submit_model_task_name
@@ -721,6 +741,10 @@ class GMICFederatedExecutor(Executor):
         _bb, _hd = self._effective_group_lrs()
         self._logger.info("[EXEC] effective LRs at init: heads=%.3e backbone=%.3e (config lr_heads=%s lr_backbone=%s)",
                           _hd, _bb, self.lr_heads, self.lr_backbone)
+        try:
+            self._log_gpu_diagnostics()
+        except Exception as e:
+            self._logger.warning("[gpu-diag] diagnostics failed (non-fatal): %s", e)
 
         # 8. TensorBoard
         self.tb_writer = None
@@ -1767,6 +1791,41 @@ class GMICFederatedExecutor(Executor):
         if getattr(self, "stage_sync", False) and torch.cuda.is_available():
             torch.cuda.synchronize()
 
+    def _log_gpu_diagnostics(self):
+        """Log GPU / CUDA / cuDNN / driver identity + effective allocator config, ONCE at init.
+
+        Every fact here is obtainable in-process, so a remote site we cannot shell into still
+        reports exactly which card + driver + cuDNN it is running -- the info needed to decide
+        whether an fp16 backward kernel that deadlocks is a known GPU/driver issue. total VRAM in
+        particular settles the card model (an fp16 personal-pass hang was observed with ~18.9 GiB
+        RESERVED, which is impossible on a 16 GiB card, so HPU is NOT the assumed 16 GiB A4000).
+        """
+        alloc_conf = os.environ.get("PYTORCH_CUDA_ALLOC_CONF", "<unset>")
+        self._logger.info("[gpu-diag] PYTORCH_CUDA_ALLOC_CONF=%s", alloc_conf)
+        if not torch.cuda.is_available():
+            self._logger.info("[gpu-diag] CUDA not available (CPU run)")
+            return
+        try:
+            props = torch.cuda.get_device_properties(0)
+            self._logger.info(
+                "[gpu-diag] device=%s total_mem=%.1f GiB torch=%s cuda=%s cudnn=%s",
+                props.name, props.total_memory / 2**30, torch.__version__,
+                torch.version.cuda, torch.backends.cudnn.version())
+        except Exception as e:
+            self._logger.warning("[gpu-diag] device props unavailable: %s", e)
+        # Driver version is not exposed by torch; nvidia-smi runs inside the container (no host
+        # access needed). Best-effort, short timeout, never fatal.
+        try:
+            import subprocess
+            out = subprocess.run(
+                ["nvidia-smi", "--query-gpu=name,driver_version,memory.total",
+                 "--format=csv,noheader"],
+                capture_output=True, text=True, timeout=10)
+            if out.stdout.strip():
+                self._logger.info("[gpu-diag] nvidia-smi: %s", out.stdout.strip().replace("\n", " | "))
+        except Exception as e:
+            self._logger.info("[gpu-diag] nvidia-smi unavailable (non-fatal): %s", e)
+
     @staticmethod
     def _cuda_mem_str():
         """allocated/reserved/peak, for logs. Empty string off-CUDA so callers stay unconditional."""
@@ -1842,9 +1901,11 @@ class GMICFederatedExecutor(Executor):
             self.log_warning(fl_ctx, "[ditto] personal model/ref not ready; skipping personal pass")
             return
         lam = self.ditto_lambda if self.method == "ditto" else self.lam_dict
-        scaler = getattr(self, "_v_scaler", None)
+        personal_amp = getattr(self, "_personal_amp", self.use_amp)
+        scaler = getattr(self, "_v_scaler", None) if personal_amp else None
         self.log_info(fl_ctx, f"[ditto] personal pass: epochs={self.epochs} lambda={lam} "
-                              f"amp={bool(self.use_amp)} stage_sync={bool(self.stage_sync)}")
+                              f"amp={bool(personal_amp)} (main use_amp={bool(self.use_amp)}) "
+                              f"stage_sync={bool(self.stage_sync)}")
         # The main loop has just filled the caching allocator; hand the reserve back before this
         # pass allocates its own activations. Purely an allocator hint -- it frees nothing live
         # and does not change the math.
@@ -1882,7 +1943,7 @@ class GMICFederatedExecutor(Executor):
                     opt.zero_grad(set_to_none=True)
                     amp_device = "cuda" if "cuda" in str(self.device) else "cpu"
                     state["stage"] = "forward"
-                    with torch.autocast(device_type=amp_device, enabled=self.use_amp):
+                    with torch.autocast(device_type=amp_device, enabled=personal_amp):
                         outputs = v(inputs)
                     self._sync()
                     # Loss OUTSIDE autocast, in fp32 -- same reason as the main loop: the GMIC
@@ -1907,7 +1968,7 @@ class GMICFederatedExecutor(Executor):
                     # Each AMP call gets its own stage: these are precisely the calls that did NOT
                     # exist in the fp32 personal pass, so a hang here must name which one.
                     state["stage"] = "backward"
-                    if scaler is not None and self.use_amp:
+                    if scaler is not None and personal_amp:
                         scaler.scale(loss).backward()
                         self._sync()
                         # unscale BEFORE clipping so max_norm applies to true (unscaled) gradients.
