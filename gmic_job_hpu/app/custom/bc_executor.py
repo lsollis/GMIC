@@ -219,6 +219,12 @@ class GMICFederatedExecutor(Executor):
             # ceiling. Only BatchNorm stats change (computed on the smaller chunk); the optimizer
             # still sees the full effective batch. Unlisted sites use batch_size (no chunking).
             personal_batch_size_by_site: dict | None = None,
+            # PER-SITE MAIN-pass micro-batch, e.g. {"HPU": 8}. Same idea as the personal map, for the
+            # shared-w training pass. Needed once the backbone UNFREEZES (round freeze_backbone_epochs):
+            # autograd then retains all backbone activations for backward, so the full fp16 batch
+            # overflows HPU's 16 GiB A4000 and deadlocks. Chunks accumulate to the full effective
+            # batch (only BN sees the chunk); unlisted sites use batch_size (no chunking).
+            train_batch_size_by_site: dict | None = None,
             grad_accumulation: int = 1,
             memory_efficient: bool = False,
             pre_train_task_name: str = AppConstants.TASK_GET_WEIGHTS,
@@ -341,6 +347,8 @@ class GMICFederatedExecutor(Executor):
             self._personal_amp_resolved = False
             self._personal_batch_size_by_site = {
                 str(k): int(v) for k, v in (personal_batch_size_by_site or {}).items()}
+            self._train_batch_size_by_site = {
+                str(k): int(v) for k, v in (train_batch_size_by_site or {}).items()}
             self.grad_accumulation = max(1, grad_accumulation)
             self.memory_efficient = memory_efficient
             self._scaler = torch.cuda.amp.GradScaler(enabled=self.use_amp) if torch.cuda.is_available() else None
@@ -1525,6 +1533,15 @@ class GMICFederatedExecutor(Executor):
         last_epoch_auc = 0.0
         last_epoch_acc = 0.0
 
+        train_bs = max(1, int(self._train_batch_size_by_site.get(
+            fl_ctx.get_identity_name(), self.batch_size)))
+        if train_bs < self.batch_size:
+            self.log_info(
+                fl_ctx,
+                f"[main-train] micro-batch={train_bs} (loader batch {self.batch_size} chunked; grads "
+                f"accumulated to the full batch, only BN sees the chunk) -- keeps the unfrozen "
+                f"backbone pass under this card's memory ceiling")
+
         for epoch in range(self.epochs):
             if abort_signal.triggered:
                 break
@@ -1557,35 +1574,53 @@ class GMICFederatedExecutor(Executor):
                 accumulate = self.grad_accumulation
                 if batch_idx % accumulate == 0:
                     self.optimizer.zero_grad(set_to_none=True)
-
                 amp_device = "cuda" if "cuda" in str(self.device) else "cpu"
-                with torch.autocast(device_type=amp_device, enabled=self.use_amp):
-                    outputs = self.model(inputs)
-                # Loss is computed OUTSIDE autocast, in fp32: F.binary_cross_entropy
-                # (global/local heads, on already-sigmoided probabilities) is unsafe under
-                # autocast and raises on GPU. The canonical AMP pattern autocasts only the
-                # forward; BCEWithLogits/backward run in fp32.
-                loss = self._compute_task_loss(outputs, targets) / accumulate
-                # FedProx: add (mu/2)||w - w_global||^2 to the w-pass loss.
-                # (No-op for fedavg/fedbn/local/ditto, where _prox_ref is None.)
+                total = inputs.size(0)
+                n_chunks = max(1, math.ceil(total / train_bs))
+                t_mb = time.time()
+                # Micro-chunk the loader batch so each forward/backward holds only `train_bs` worth of
+                # activations. Critical once the backbone UNFREEZES: autograd then retains all backbone
+                # activations for backward, and the full fp16 batch overflows a 16 GiB card -> host-RAM
+                # oversubscription -> deadlock. Loss OUTSIDE autocast in fp32 (BCE on sigmoided probs is
+                # unsafe under autocast). Each chunk's loss is weighted by its share and divided by the
+                # grad-accum factor, so the accumulated gradient == a single full loader-batch step's;
+                # only BN sees the smaller chunk. n_chunks==1 (train_bs >= batch) is the un-chunked path.
+                effective_loss = 0.0
+                for ci in range(n_chunks):
+                    cx = inputs[ci * train_bs:(ci + 1) * train_bs]
+                    cy = targets[ci * train_bs:(ci + 1) * train_bs]
+                    if cx.size(0) == 0:
+                        continue
+                    with torch.autocast(device_type=amp_device, enabled=self.use_amp):
+                        out = self.model(cx)
+                    loss_c = self._compute_task_loss(out, cy) * (cx.size(0) / total) / accumulate
+                    if self.use_amp and self._scaler is not None:
+                        self._scaler.scale(loss_c).backward()
+                    else:
+                        loss_c.backward()
+                    effective_loss += float(loss_c.item()) * accumulate
+                    # Malignant probability for batch AUC = sigmoid(fusion_logit)[:, 1]
+                    epoch_preds.extend(malignant_score(out).detach().cpu().numpy().reshape(-1))
+                    epoch_targets.extend(cy.detach().cpu().numpy().reshape(-1))
+                # FedProx: (mu/2)||w - w_global||^2, once per loader batch (None for
+                # fedavg/fedbn/local/ditto -> skipped).
                 if getattr(self, "_prox_ref", None) is not None:
-                    loss = loss + proximal_penalty(
-                        self._underlying, self._prox_ref, self._prox_lambda
-                    ) / accumulate
+                    prox = proximal_penalty(
+                        self._underlying, self._prox_ref, self._prox_lambda) / accumulate
+                    if self.use_amp and self._scaler is not None:
+                        self._scaler.scale(prox).backward()
+                    else:
+                        prox.backward()
+                    effective_loss += float(prox.item()) * accumulate
 
-                if self.use_amp and self._scaler is not None:
-                    self._scaler.scale(loss).backward()
-                    if (batch_idx + 1) % accumulate == 0:
+                if (batch_idx + 1) % accumulate == 0:
+                    if self.use_amp and self._scaler is not None:
                         self._scaler.step(self.optimizer)
                         self._scaler.update()
-                else:
-                    loss.backward()
-                    if (batch_idx + 1) % accumulate == 0:
+                    else:
                         self.optimizer.step()
 
-                effective_loss = loss.item() * accumulate
-                bsz = inputs.size(0)
-                total_samples += bsz
+                total_samples += total
                 epoch_loss += effective_loss
                 epoch_batches += 1
 
@@ -1600,15 +1635,11 @@ class GMICFederatedExecutor(Executor):
                     except Exception as e:
                         self.log_warning(fl_ctx, f"[devices] diagnostics failed: {e}")
 
-                # Malignant probability for batch AUC = sigmoid(fusion_logit)[:, 1]
-                pos_probs = malignant_score(outputs).detach().cpu().numpy().reshape(-1)
-                pos_targets = targets.detach().cpu().numpy().reshape(-1)
-
-                epoch_preds.extend(pos_probs)
-                epoch_targets.extend(pos_targets)
-
                 if self.train_log_batch_interval and (batch_idx % self.train_log_batch_interval == 0):
-                    self.log_info(fl_ctx, f"Epoch {epoch + 1} Batch {batch_idx} Loss {effective_loss:.4f}")
+                    self.log_info(
+                        fl_ctx,
+                        f"Epoch {epoch + 1} Batch {batch_idx} Loss {effective_loss:.4f} "
+                        f"({time.time() - t_mb:.1f}s) chunks={n_chunks}x{train_bs} {self._cuda_mem_str()}")
 
                 if self.memory_efficient and torch.cuda.is_available():
                     torch.cuda.empty_cache()
