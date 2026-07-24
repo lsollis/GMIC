@@ -59,6 +59,7 @@
           "debug_devices": false,
           "use_amp": true,
           "personal_amp_by_site": {"HPU": false},
+          "personal_batch_size_by_site": {"HPU": 8},
           "grad_accumulation": 1,
           "memory_efficient": true,
           "gpus": "0",

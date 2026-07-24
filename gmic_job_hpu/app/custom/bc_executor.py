@@ -212,6 +212,13 @@ class GMICFederatedExecutor(Executor):
             # footprint fits its 16 GiB card but fp16 faults there; RSNA's fp32 footprint OOMs a
             # small card so it needs AMP -- one global precision cannot satisfy both.
             personal_amp_by_site: dict | None = None,
+            # PER-SITE personal-pass micro-batch size, e.g. {"HPU": 8}. The personal pass processes
+            # each loader batch in chunks of this size, accumulating gradients to the full effective
+            # batch, so a card too small for the full fp32 batch (HPU's 16 GiB A4000, which
+            # oversubscribes to host RAM and DEADLOCKS on the full batch) stays under its memory
+            # ceiling. Only BatchNorm stats change (computed on the smaller chunk); the optimizer
+            # still sees the full effective batch. Unlisted sites use batch_size (no chunking).
+            personal_batch_size_by_site: dict | None = None,
             grad_accumulation: int = 1,
             memory_efficient: bool = False,
             pre_train_task_name: str = AppConstants.TASK_GET_WEIGHTS,
@@ -332,6 +339,8 @@ class GMICFederatedExecutor(Executor):
             self._personal_amp_by_site = dict(personal_amp_by_site or {})
             self._personal_amp = self._personal_amp_default
             self._personal_amp_resolved = False
+            self._personal_batch_size_by_site = {
+                str(k): int(v) for k, v in (personal_batch_size_by_site or {}).items()}
             self.grad_accumulation = max(1, grad_accumulation)
             self.memory_efficient = memory_efficient
             self._scaler = torch.cuda.amp.GradScaler(enabled=self.use_amp) if torch.cuda.is_available() else None
@@ -1952,6 +1961,13 @@ class GMICFederatedExecutor(Executor):
             )
         v.train()
         client_name = fl_ctx.get_identity_name()
+        personal_bs = max(1, int(self._personal_batch_size_by_site.get(client_name, self.batch_size)))
+        if personal_bs < self.batch_size:
+            self.log_info(
+                fl_ctx,
+                f"[ditto] personal micro-batch={personal_bs} (loader batch {self.batch_size} split "
+                f"into chunks; gradients accumulated to the full effective batch, only BN sees the "
+                f"smaller chunk) -- keeps the personal pass under this card's memory ceiling")
         for epoch in range(self.epochs):
             if abort_signal.triggered:
                 break
@@ -1973,71 +1989,80 @@ class GMICFederatedExecutor(Executor):
                     state["stage"] = "h2d"
                     inputs = inputs.to(self.device)
                     targets = targets.to(self.device)
-                    opt.zero_grad(set_to_none=True)
+                    total = inputs.size(0)
+                    n_chunks = max(1, math.ceil(total / personal_bs))
                     amp_device = "cuda" if "cuda" in str(self.device) else "cpu"
-                    state["stage"] = "forward"
-                    with torch.autocast(device_type=amp_device, enabled=personal_amp):
-                        outputs = v(inputs)
-                    self._sync()
-                    # Loss OUTSIDE autocast, in fp32 -- same reason as the main loop: the GMIC
-                    # heads emit already-sigmoided probabilities and F.binary_cross_entropy is
-                    # unsafe under autocast. The proximal term reads v's fp32 master weights,
-                    # so it is fp32 too.
-                    state["stage"] = "loss+prox"
-                    loss = self._compute_task_loss(outputs, targets)
-                    loss = loss + proximal_penalty(v, self._global_ref, lam)
-                    # Stability guard: v PERSISTS across rounds, so a single non-finite step would
-                    # poison it for the whole run (-> NaN val AUC -> reported as 0.0). Two layers:
-                    # this check skips a non-finite LOSS, and (under AMP) scaler.step additionally
-                    # skips the update on non-finite GRADIENTS, which the loss check cannot see.
-                    if not torch.isfinite(loss):
+                    opt.zero_grad(set_to_none=True)
+                    # Micro-chunk the loader batch so each forward/backward only holds `personal_bs`
+                    # worth of activations. Gradients accumulate across chunks, so the optimizer step
+                    # equals a single full-batch step; only BatchNorm sees the smaller chunk. When
+                    # n_chunks==1 (personal_bs >= batch_size) this is the un-chunked path.
+                    nonfinite = False
+                    task_loss_sum = 0.0
+                    state["stage"] = "forward/backward"
+                    for ci in range(n_chunks):
+                        cx = inputs[ci * personal_bs:(ci + 1) * personal_bs]
+                        cy = targets[ci * personal_bs:(ci + 1) * personal_bs]
+                        if cx.size(0) == 0:
+                            continue
+                        with torch.autocast(device_type=amp_device, enabled=personal_amp):
+                            out = v(cx)
+                        # Loss OUTSIDE autocast in fp32 (GMIC heads emit sigmoided probs; BCE is
+                        # unsafe under autocast). Weighted by the chunk's share of the batch so the
+                        # accumulated gradient equals a single full-batch step's (mean-reduced loss
+                        # + the per-call L1 term both scale correctly, since the weights sum to 1).
+                        loss_c = self._compute_task_loss(out, cy) * (cx.size(0) / total)
+                        # Stability guard: v PERSISTS across rounds, so one non-finite step poisons
+                        # it for the whole run. Drop the ENTIRE batch's step if any chunk is bad.
+                        if not torch.isfinite(loss_c):
+                            nonfinite = True
+                            break
+                        (scaler.scale(loss_c) if (scaler is not None and personal_amp)
+                         else loss_c).backward()
+                        task_loss_sum += float(loss_c.item())
+                    if nonfinite:
                         n_skipped += 1
+                        opt.zero_grad(set_to_none=True)
                         self.log_warning(
                             fl_ctx,
                             f"[ditto] non-finite personal loss (epoch {epoch + 1} "
                             f"batch {batch_idx}); skipping step")
                         state["t_last_progress"] = time.time()
                         continue
-                    # Each AMP call gets its own stage: these are precisely the calls that did NOT
-                    # exist in the fp32 personal pass, so a hang here must name which one.
-                    state["stage"] = "backward"
+                    # Proximal penalty ONCE per optimizer step -- it regularizes the weights, not
+                    # per-sample, so adding it per chunk would multiply its strength.
+                    state["stage"] = "prox"
+                    prox = proximal_penalty(v, self._global_ref, lam)
+                    if not torch.isfinite(prox):
+                        n_skipped += 1
+                        opt.zero_grad(set_to_none=True)
+                        self.log_warning(fl_ctx, f"[ditto] non-finite proximal (epoch {epoch + 1} "
+                                                 f"batch {batch_idx}); skipping step")
+                        state["t_last_progress"] = time.time()
+                        continue
+                    (scaler.scale(prox) if (scaler is not None and personal_amp) else prox).backward()
+                    state["stage"] = "step"
                     if scaler is not None and personal_amp:
-                        scaler.scale(loss).backward()
-                        self._sync()
-                        # unscale BEFORE clipping so max_norm applies to true (unscaled) gradients.
-                        state["stage"] = "unscale"
-                        scaler.unscale_(opt)
-                        self._sync()
-                        state["stage"] = "clip"
+                        scaler.unscale_(opt)  # before clip, so max_norm applies to true gradients
                         torch.nn.utils.clip_grad_norm_(v.parameters(), max_norm=5.0)
-                        self._sync()
-                        state["stage"] = "step"
                         scaler.step(opt)
-                        self._sync()
-                        state["stage"] = "scaler-update"
                         scaler.update()
-                        self._sync()
                     else:
-                        loss.backward()
-                        self._sync()
-                        state["stage"] = "clip"
                         torch.nn.utils.clip_grad_norm_(v.parameters(), max_norm=5.0)
-                        self._sync()
-                        state["stage"] = "step"
                         opt.step()
-                        self._sync()
+                    self._sync()
                     n_batches += 1
                     state["stage"] = "load"  # back to waiting on the iterator for the next batch
                     state["t_last_progress"] = time.time()
-                    # Per-batch progress, mirroring the main loop's train_log_batch_interval. The
-                    # personal pass used to log NOTHING until the epoch ended, which made a stall
-                    # indistinguishable from normal work on a site we cannot shell into. Elapsed
-                    # is included so "slow" is quantifiable, not just "not finished yet".
+                    # Per-batch progress (mirrors the main loop's train_log_batch_interval). The
+                    # displayed loss is the full-batch task loss + proximal; elapsed makes "slow"
+                    # quantifiable, and chunks=NxM shows the micro-batching in effect.
                     if self.train_log_batch_interval and (batch_idx % self.train_log_batch_interval == 0):
                         self.log_info(
                             fl_ctx,
                             f"[ditto] personal epoch {epoch + 1} batch {batch_idx} "
-                            f"loss {loss.item():.4f} ({time.time() - t_batch:.1f}s) "
+                            f"loss {task_loss_sum + float(prox.item()):.4f} "
+                            f"({time.time() - t_batch:.1f}s) chunks={n_chunks}x{personal_bs} "
                             f"{self._cuda_mem_str()}")
             dt = time.time() - t_epoch
             self.log_info(

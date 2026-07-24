@@ -144,11 +144,13 @@ def test_stage_sync_does_not_change_training():
     print("[amp] stage_sync is behavior-neutral. OK")
 
 
-def test_personal_pass_stages_are_granular_under_amp():
-    """The AMP-only calls must each be individually nameable when something wedges.
+def test_personal_pass_sets_stage_labels():
+    """The heartbeat's `stage` must track where the personal pass is, so a wedge is localizable.
 
-    A hang inside scaler.unscale_ vs clip vs scaler.step is the exact question we cannot answer
-    today, so these must be distinct stages rather than one lumped 'step'.
+    The fine-grained per-AMP-op stages (unscale/clip/scaler-update) were scaffolding for the fp16
+    hang diagnosis and were collapsed when the pass was micro-chunked; the live stages are now
+    load / h2d / forward/backward / prox / step. This pins that the compute stages are set: the
+    task-loss call happens under 'forward/backward', and _sync (after the step) under 'step'.
     """
     import bc_executor as BE
     seen, holder = [], {}
@@ -156,18 +158,18 @@ def test_personal_pass_stages_are_granular_under_amp():
 
     @contextlib.contextmanager
     def capturing_hb(self, label, state):
-        holder["state"] = state  # the dict the loop mutates; read after each _sync
+        holder["state"] = state  # the dict the personal loop mutates
         with real_hb(self, label, state) as s:
             yield s
 
     with tempfile.TemporaryDirectory() as td:
-        # The AMP branch is gated on `scaler is not None`, and the scaler is only built when CUDA
-        # is available -- so on a CPU-only box the fp32 branch would run and the AMP-only stages
-        # would never appear. Fake CUDA for construction: PyTorch then builds a GradScaler that
-        # self-disables (no CUDA), which is exactly the pass-through we want for a label test.
         with mock.patch.object(torch.cuda, "is_available", return_value=True):
             ex = make_executor("ditto_modulewise", td, use_amp=True, heartbeat_interval_s=0)
-        assert ex._v_scaler is not None
+        # capture the live stage at the task-loss call (forward/backward) and at _sync (step).
+        # eval phases enter a heartbeat too but their state has no 'stage' key -> None, harmless.
+        orig_loss = ex._compute_task_loss
+        ex._compute_task_loss = lambda o, t: (
+            seen.append(holder.get("state", {}).get("stage")), orig_loss(o, t))[1]
         real_sync = ex._sync
         ex._sync = lambda: (seen.append(holder.get("state", {}).get("stage")), real_sync())[1]
         BE.GMICFederatedExecutor._heartbeat = capturing_hb
@@ -175,9 +177,9 @@ def test_personal_pass_stages_are_granular_under_amp():
             run_round(ex, GMIC(copy.deepcopy(GMIC_PARAMS)), round_idx=0, total_rounds=1)
         finally:
             BE.GMICFederatedExecutor._heartbeat = real_hb
-    for expected in ("forward", "backward", "unscale", "clip", "step", "scaler-update"):
-        assert expected in seen, f"stage '{expected}' is not separately observable; got {set(seen)}"
-    print(f"[amp] personal step exposes granular stages: {sorted(set(x for x in seen if x))}. OK")
+    for expected in ("forward/backward", "step"):
+        assert expected in seen, f"stage '{expected}' never set; got {set(x for x in seen if x)}"
+    print(f"[amp] personal pass sets stage labels: {sorted(set(x for x in seen if x))}. OK")
 
 
 def test_personal_amp_false_forces_fp32_while_main_stays_amp():
