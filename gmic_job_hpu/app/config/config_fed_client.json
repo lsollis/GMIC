@@ -87,7 +87,7 @@
           "cache_global_trajectory": true,
           "cache_incoming_global": true,
           "eval_incoming_global": true,
-          "resume_from_local_round": 8,
+          "resume_from_local_round": 18,
           "resume_ckpt_dir": "/workspace/data/processed/ditto_mw_g0.01_l0.5_f0_amp_3client_20260724",
 
           "log_file": "/workspace/data/processed/ditto_mw_g0.01_l0.5_f0_amp_3client_20260724/executor.log",
