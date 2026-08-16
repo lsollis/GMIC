@@ -167,7 +167,7 @@ def youden(y, s):
     fpr, tpr, thr = roc_curve(y, s); return float(thr[int(np.argmax(tpr - fpr))])
 
 # ---------------- main ----------------
-def run(pred_csv, meta_csv, threshold=None, val_csv=None):
+def run(pred_csv, meta_csv, threshold=None, val_csv=None, out_csv=None):
     preds = load(pred_csv)
     print(f"[cols] prediction file columns: {list(preds[0].keys())}")
     meta = load_meta(meta_csv)
@@ -247,6 +247,23 @@ def run(pred_csv, meta_csv, threshold=None, val_csv=None):
               f"{sens:>6.3f} [{sl:.3f},{sh:.3f}]{spec:>7.3f}{ppv:>7.3f}{fpr:>7.3f}"
               f"{sfs:>7.3f}{sps:>7.3f}{flag}")
     print(f"\n  * = fewer than {MIN_POS} positives: unstable, report N and treat as exploratory.")
+
+    # --- machine-readable table, written next to wherever you run this (top-level /workspace) ---
+    if out_csv is None:
+        out_csv = _stem(pred_csv) + "_subgroups.csv"
+    base = os.path.basename(pred_csv)
+    with open(out_csv, "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["pred_file", "group", "N", "pos", "auc", "auc_lo", "auc_hi",
+                    "sens", "sens_lo", "sens_hi", "spec", "ppv", "fpr",
+                    f"sens_at_spec{FIXED_SPEC}", f"spec_at_sens{FIXED_SENS}",
+                    "threshold", "unstable"])
+        for (g, N, npos, auc, lo, hi, sens, sl, sh, spec, ppv, fpr, sfs, sps) in rows:
+            w.writerow([base, g, N, npos, f"{auc:.4f}", f"{lo:.4f}", f"{hi:.4f}",
+                        f"{sens:.4f}", f"{sl:.4f}", f"{sh:.4f}", f"{spec:.4f}",
+                        f"{ppv:.4f}", f"{fpr:.4f}", f"{sfs:.4f}", f"{sps:.4f}",
+                        f"{threshold:.4f}", int(npos < MIN_POS)])
+    print(f"[out] wrote {len(rows)} group rows -> {os.path.abspath(out_csv)}")
     return rows
 
 if __name__ == "__main__":
@@ -255,5 +272,6 @@ if __name__ == "__main__":
     ap.add_argument("--meta", required=True, help="UHCC registry CSV with patient_id/exam_id/laterality/view + ETH_DESCR")
     ap.add_argument("--val", default=None, help="optional Site A validation prediction CSV (Youden operating point)")
     ap.add_argument("--threshold", type=float, default=None, help="fixed operating threshold (overrides --val)")
+    ap.add_argument("--out", default=None, help="output CSV path (default: <pred_stem>_subgroups.csv in cwd)")
     a = ap.parse_args()
-    run(a.pred, a.meta, threshold=a.threshold, val_csv=a.val)
+    run(a.pred, a.meta, threshold=a.threshold, val_csv=a.val, out_csv=a.out)
