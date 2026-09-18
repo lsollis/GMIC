@@ -1,5 +1,8 @@
 #!/usr/bin/env python
-"""Per-race subgroup fairness for Site A (UHCC/HIPIMR) -- post-hoc, no model rerun / FL job.
+# Part of the federated-learning extension of GMIC.
+# Copyright (C) 2026 Shepherd Research Lab, University of Hawaiʻi Cancer Center.
+# Licensed under GNU AGPLv3 (see LICENSE and NOTICE).
+"""Per-race subgroup fairness for one site -- post-hoc, no model rerun / FL job.
 
 Joins a deployed model's Site A test predictions to registry race/ethnicity
 (ETH_DESCR) and reports per-group AUC + operating-point metrics with CIs.

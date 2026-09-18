@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# Part of the federated-learning extension of GMIC.
+# Copyright (C) 2026 Shepherd Research Lab, University of Hawaiʻi Cancer Center.
+# Licensed under GNU AGPLv3 (see LICENSE and NOTICE).
 """Dump per-ROUND val+test predictions for personalized runs (Ditto family), so they get a full
 per-round trajectory -- exactly like the shared methods' `incoming_global` -- and can be reported
 best-val-selected (per-site AND pooled), fully apples-to-apples.

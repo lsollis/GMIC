@@ -1,199 +1,160 @@
-# An interpretable classifier for high-resolution breast cancer screening images utilizing weakly supervised localization
+# Personalized Federated Learning for Equitable Breast Cancer Detection
 
-## Introduction
-This is an implementation of the Globally-Aware Multiple Instance Classifier (GMIC) model as described in [our paper](https://arxiv.org/abs/2002.07613). The architecture of the proposed model is shown below.
+A federated-learning (FL) training and evaluation system for breast cancer
+detection across multiple clinical sites, built on the
+[GMIC](https://github.com/nyukat/GMIC) mammography model and
+[NVIDIA FLARE](https://github.com/NVIDIA/NVFlare) (NVFLARE).
 
-<p align="center">
-  <img width="793" height="729" src="https://github.com/nyukat/GMIC/blob/master/mia_structure.png">
-</p>
+This code accompanies:
 
-Highlights of GMIC:
-- **High Accuracy**: GMIC outperformed ResNet-34 and Faster R-CNN.
-- **High Efficiency**: Compared to ResNet-34, GMIC has **28.8%** fewer parameters, uses **78.43%** less GPU memory and is **4.1x** faster during inference and **5.6x** faster during training.
-- **Weakly Supervised Lesion Localization**: Despite being trained with only image-level labels indicating the presence of any benign or malignant lesion, GMIC is able to generate pixel-level saliency maps (shown below) that provide additional interpretability.
+> Sollis LJ, Young PM, Bunnell A, Quon B, Hernandez BY, Wolfgruber TK, Shepherd J.
+> **"Personalized Federated Learning for Equitable Breast Cancer Detection in
+> Underrepresented Pacific Islander Populations."** MICCAI 2026 Workshop on
+> Distributed, Collaborative, and Federated Learning (DeCaF); to appear in
+> Springer LNCS.
 
-The implementation allows users to obtain breast cancer predictions and visualization of saliency maps by applying one of our pretrained models. We provide weights for 5 GMIC-ResNet-18 models. The model is implemented in PyTorch. 
+> **Built on GMIC (NYU).** The underlying image model — the Globally-Aware
+> Multiple-instance Classifier — and its preprocessing are the work of Shen et
+> al. (NYU); see [`GMIC_MODEL_README.md`](GMIC_MODEL_README.md), the
+> [original repository](https://github.com/nyukat/GMIC), and
+> [arXiv:2002.07613](https://arxiv.org/abs/2002.07613). This repository extends
+> that model with a federated training/evaluation system. It is a derivative
+> work and, like GMIC, is licensed under **GNU AGPLv3** (see
+> [LICENSE](LICENSE) and [NOTICE](NOTICE)).
 
-* Input: A mammography image that is cropped to 2944 x 1920 and are saved as 16-bit png files. As a part of this repository, we provide 4 sample exams (in `sample_data/images` directory and exam list stored in `sample_data/exam_list_before_cropping.pkl`), each of which includes 2 CC view images and 2 MLO view images. Those exams contain original mammogrphy images and therefore need to be preprocessed (see the Preprocessing section). 
+---
 
-* Output: The GMIC model generates one prediction for each image: probability of benign and malignant findings. All predictions are saved into a csv file `$OUTPUT_PATH/predictions.csv` that contains the following columns: image_index, benign_pred, malignant_pred, benign_label, malignant_label. In addition, each input image is associated with a visualization file saved under `$OUTPUT_PATH/visualization`. An exemplar visualization file is illustrated below. The images (from left to right) represent:
-  * input mammography with ground truth annotation (green=benign, red=malignant),
-  * patch map that illustrates the locations of ROI proposal patches (blue squares),
-  * saliency map for benign class,
-  * saliency map for malignant class,
-  * 6 ROI proposal patches with the associated attention score on top.
-  
-![alt text](https://github.com/nyukat/GMIC/blob/master/sample_data/sample_visualization.png)
+## What this adds to GMIC
 
-**Update (2021/03/08)**: Updated the documentation
+GMIC is a single-model image classifier. This repository wraps it in an NVFLARE
+executor so several clinical sites can train a shared model **without pooling
+patient data**, and adds the pieces needed to study cross-site and
+cross-demographic equity:
 
-**Update (2020/12/15)**: Added the preprocessing pipeline.
+- **Federated methods** — FedAvg, FedProx, FedBN, and personalized **Ditto**
+  (both a scalar proximal weight and a module-wise variant with separate
+  weights for the model's global / local / fusion blocks).
+- **Per-round evaluation** — each round dumps per-site validation/test
+  predictions so AUC, DeLong CIs, and operating points can be computed offline
+  and pooled across sites.
+- **Crash-resume** — an interrupted federated run can resume from the last
+  completed round without restarting.
+- **Constrained-GPU training** — optional per-site precision and micro-batch
+  controls that let a memory-limited GPU participate (see below).
+- **Subgroup fairness analysis** — post-hoc per-race/ethnicity metrics
+  (AUC + CIs, sensitivity at fixed specificity, etc.) for any deployed model.
 
-**Update (2020/12/16)**: Added the [example notebook](https://github.com/nyukat/GMIC/blob/master/example_notebook.ipynb).
+## Repository layout
 
+| Path | Purpose |
+|------|---------|
+| `gmic_job_hpu/` | Real (multi-site) federated job; the executor lives at `app/custom/bc_executor.py`. |
+| `gmic_job/` | Base federated job (single canonical executor, shared by all jobs). |
+| `gmic_job_ditto_sim/`, `gmic_job_ditto_mw_sim/`, `gmic_job_fedprox_sim/`, `gmic_job_fedbn_sim/` | NVFLARE **simulator** jobs, one per method, for local multi-site experiments. |
+| `pool_report_job/` | Pools each site's per-round predictions into combined AUC/DeLong/operating-point statistics. |
+| `ditto_sweep/` | Hyperparameter sweeps (Ditto λ; FedProx μ). |
+| `subgroup_fairness.py` | Per-race/ethnicity fairness for one site's deployed model. |
+| `run_all_subgroups.py` | Runs `subgroup_fairness.py` across every method and builds a combined table. |
+| `dump_ditto_perround_preds.py` | Dumps per-round predictions for personalized (Ditto) runs. |
+| `tools/` | Operational helpers (salvage/resume runbooks). |
 
-## Prerequisites
+All six job folders carry a **byte-identical** copy of `bc_executor.py` (NVFLARE
+requires per-job custom code); change one and re-copy to keep them in sync.
 
-* Python (3.6)
-* PyTorch (1.1.0)
-* torchvision (0.2.2)
-* NumPy (1.14.3)
-* SciPy (1.0.0)
-* H5py (2.7.1)
-* imageio (2.4.1)
-* pandas (0.22.0)
-* opencv-python (3.4.2)
-* tqdm (4.19.8)
-* matplotlib (3.0.2)
+## Requirements & setup
 
+The model, data pipeline, and FL stack run in a Docker container. See
+[`GMIC_MODEL_README.md`](GMIC_MODEL_README.md) for the model/preprocessing
+prerequisites and `Dockerfile` / `docker-compose.yml` for the container. In
+brief: PyTorch + NVFLARE, one GPU per site, mammography images preprocessed to
+2944×1920 16-bit PNGs.
+
+Each site provides a metadata CSV (see
+[`site_folders/sample_gmic_data_format.csv`](site_folders/sample_gmic_data_format.csv)
+for the schema: `patient_id, exam_id, laterality, view, file_path,
+exam_level_label, view_level_label, split_group, ...`). No patient data is
+included in this repository.
+
+## Configuring a federated method
+
+A job's method and hyperparameters are set in `app/config/config_fed_client.json`
+(executor args). Key knobs:
+
+| Config key | Meaning |
+|------------|---------|
+| `method` | `fedavg`, `fedprox`, `fedbn`, `ditto`, or `ditto_modulewise`. |
+| `fedprox_mu` | FedProx proximal strength (μ). |
+| `ditto_lambda` | Ditto proximal weight (scalar Ditto). |
+| `lambda_global` / `lambda_local` / `lambda_fusion` | Per-block Ditto weights (module-wise). |
+| `use_fedbn` | Keep BatchNorm layers local (FedBN). |
+| `use_amp` | Mixed-precision training. |
+| `resume_from_local_round` | Resume an interrupted run from this round (`-1` = fresh). |
+
+Per-folder `FEDERATED_METHODS.md` files document each method in detail.
+
+## Training on a memory-constrained GPU
+
+The federated methods run best on ample-memory GPUs, but a site on a smaller
+card (e.g. a 16 GiB RTX A4000) can still participate using the optional,
+**default-off** toggles below. They are resolved from the FL identity at
+runtime, so one config deployed to every site affects only the listed site — no
+per-site app copies, and no need to move a site to a larger GPU. Leave them
+unset on capable GPUs; every default reproduces standard behavior.
+
+| Config key (executor arg) | Effect when set |
+|---------------------------|-----------------|
+| `personal_amp_by_site` | Per-site precision for the Ditto personal pass, e.g. `{"SITE_X": false}` forces fp32 there while others keep AMP. Unset → follows `use_amp`. |
+| `personal_batch_size_by_site` | Per-site micro-batch for the personal pass, e.g. `{"SITE_X": 8}`; chunks accumulate to the full effective batch (only BatchNorm sees the chunk). Unset → no chunking. |
+| `train_batch_size_by_site` | Same, for the main (shared-weight) training pass. |
+| `heartbeat_interval_s` | Seconds between watchdog-thread progress logs during long phases; logs only, never aborts. `0` (default) disables. |
+| `memory_efficient` | Release cached CUDA memory between passes. |
+| `stage_sync`, `debug_devices` | Diagnostics for locating a stalled/faulting CUDA op. |
+
+Micro-batch chunking is gradient-exact (the optimizer sees the full effective
+batch); only BatchNorm statistics are computed on the smaller chunk.
+
+## Analysis tools
+
+- **Pooled statistics** — submit `pool_report_job` to combine per-site
+  predictions into AUC, DeLong CIs, Youden thresholds, and operating-point
+  metrics.
+- **Subgroup fairness** — after a run, compute per-race/ethnicity metrics for a
+  site's deployed model. The site label and the race/ethnicity columns and
+  code→group mapping are all runtime parameters, so the tool carries no
+  site-specific schema:
+
+  ```bash
+  python subgroup_fairness.py \
+      --pred  <SITE>_predictions_<method>_round<N>_test.csv \
+      --val   <SITE>_predictions_<method>_round<N>_val.csv \
+      --meta  <site_registry>.csv \
+      --site  <SITE> --eth-col <race_column> --eth-map <map.json>
+  ```
+
+  `run_all_subgroups.py` runs this across every method (auto-selecting each
+  method's best-validation round) and writes a combined table plus a
+  group × method summary.
+
+## Citation
+
+If you use this code, please cite both the federated-learning paper (above) and
+the original GMIC work:
+
+```bibtex
+@article{shen2021gmic,
+  title   = {An interpretable classifier for high-resolution breast cancer
+             screening images utilizing weakly supervised localization},
+  author  = {Shen, Yiqiu and Wu, Nan and Phang, Jason and Park, Jungkyu and
+             Liu, Kangning and Tyagi, Sudarshini and Heacock, Laura and
+             Kim, S. Gene and Moy, Linda and Cho, Kyunghyun and Geras, Krzysztof J.},
+  journal = {Medical Image Analysis},
+  year    = {2021}
+}
+```
 
 ## License
 
-This repository is licensed under the terms of the GNU AGPLv3 license.
-
-## How to run the code
-
-You need to first install conda in your environment. **Before running the code, please run `pip install -r requirements.txt` first.** Once you have installed all the dependencies, `run.sh` will automatically run the entire pipeline and save the prediction results in csv. Note that you need to first cd to the project directory and then execute `. ./run.sh`. When running the individual Python scripts, please include the path to this repository in your `PYTHONPATH`. 
-
-We recommend running the code with a GPU. To run the code with CPU only, please change `DEVICE_TYPE` in run.sh to 'cpu'. 
-
-The following variables defined in `run.sh` can be modified as needed:
-* `MODEL_PATH`: The path where the model weights are saved.
-* `CROPPED_IMAGE_PATH`: The directory where cropped mammograms are saved.
-* `SEG_PATH`: The directory where ground truth segmenations are saved.
-* `EXAM_LIST_PATH`: The path where the exam list is stored.
-* `OUTPUT_PATH`: The path where visualization files and predictions will be saved.
-* `DEVICE_TYPE`: Device type to use in heatmap generation and classifiers, either 'cpu' or 'gpu'.
-* `GPU_NUMBER`: GPUs number multiple GPUs are available.
-* `MODEL_INDEX`: Which one of the five models to use. Valid values include {'1', '2', '3', '4', '5','ensemble'}.
-* `visualization-flag`: Whether to generate visualization.
-
-
-You should obtain the following outputs for the sample exams provided in the repository (found in `sample_output/predictions.csv` by default). 
-
-image_index  |  benign_pred  |  malignant_pred  |  benign_label  |  malignant_label
--------------|---------------|------------------|----------------|-----------------
-0_L-CC       |  0.1356       |  0.0081          |  0             |  0
-0_R-CC       |  0.8929       |  0.3259          |  1             |  0
-0_L-MLO      |  0.2368       |  0.0335          |  0             |  0
-0_R-MLO      |  0.9509       |  0.1812          |  1             |  0
-1_L-CC       |  0.0546       |  0.0168          |  0             |  0
-1_R-CC       |  0.5986       |  0.9910          |  0             |  1
-1_L-MLO      |  0.0414       |  0.0139          |  0             |  0
-1_R-MLO      |  0.5383       |  0.9308          |  0             |  1
-2_L-CC       |  0.0678       |  0.0227          |  0             |  0
-2_R-CC       |  0.1917       |  0.0603          |  1             |  0
-2_L-MLO      |  0.1210       |  0.0093          |  0             |  0
-2_R-MLO      |  0.2440       |  0.0231          |  1             |  0
-3_L-CC       |  0.6295       |  0.9326          |  0             |  1
-3_R-CC       |  0.2291       |  0.1603          |  0             |  0
-3_L-MLO      |  0.6304       |  0.7496          |  0             |  1
-3_R-MLO      |  0.0622       |  0.0507          |  0             |  0
-
-
-## Data
-
-`sample_data/images` contains 4 exams each of which includes 4 the original mammography images (L-CC, L-MLO, R-CC, R-MLO). All mammography images are saved in png format. The original 12-bit mammograms are saved as rescaled 16-bit images to preserve the granularity of the pixel intensities, while still being correctly displayed in image viewers.
-
-`sample_data/segmentation` contains the binary pixel-level segmentation labels for some exams. All segmentations are saved as png images.
-
-`sample_data/exam_list_before_cropping.pkl` contains a list of exam information. Each exam is represented as a dictionary with the following format:
-
-```python
-{'horizontal_flip': 'NO',
-  'L-CC': ['0_L-CC'],
-  'L-MLO': ['0_L-MLO'],
-  'R-MLO': ['0_R-MLO'],
-  'R-CC': ['0_R-CC'],
-  'best_center': {'R-CC': [(1136.0, 158.0)],
-   'R-MLO': [(1539.0, 252.0)],
-   'L-MLO': [(1530.0, 307.0)],
-   'L-CC': [(1156.0, 262.0)]},
-  'cancer_label': {'benign': 1,
-   'right_benign': 0,
-   'malignant': 0,
-   'left_benign': 1,
-   'unknown': 0,
-   'right_malignant': 0,
-   'left_malignant': 0},
-  'L-CC_benign_seg': ['0_L-CC_benign'],
-  'L-CC_malignant_seg': ['0_L-CC_malignant'],
-  'L-MLO_benign_seg': ['0_L-MLO_benign'],
-  'L-MLO_malignant_seg': ['0_L-MLO_malignant'],
-  'R-MLO_benign_seg': ['0_R-MLO_benign'],
-  'R-MLO_malignant_seg': ['0_R-MLO_malignant'],
-  'R-CC_benign_seg': ['0_R-CC_benign'],
-  'R-CC_malignant_seg': ['0_R-CC_malignant']}
-```
-In their original formats, images from `L-CC` and `L-MLO` views face right, and images from `R-CC` and `R-MLO` views face left. We horizontally flipped `R-CC` and `R-MLO` images so that all four views face right. Values for `L-CC`, `R-CC`, `L-MLO`, and `R-MLO` are list of image filenames without extensions and directory name. 
-
-### Preprocessing
-
-Run the following commands to crop mammograms and calculate information about augmentation windows.
-
-#### Crop mammograms
-```bash
-python3 src/cropping/crop_mammogram.py \
-    --input-data-folder $DATA_FOLDER \
-    --output-data-folder $CROPPED_IMAGE_PATH \
-    --exam-list-path $INITIAL_EXAM_LIST_PATH  \
-    --cropped-exam-list-path $CROPPED_EXAM_LIST_PATH  \
-    --num-processes $NUM_PROCESSES
-```
-`src/import_data/crop_mammogram.py` crops the mammogram around the breast and discards the background in order to improve image loading time and time to run segmentation algorithm and saves each cropped image to `$PATH_TO_SAVE_CROPPED_IMAGES/short_file_path.png` using h5py. In addition, it adds additional information for each image and creates a new image list to `$CROPPED_IMAGE_LIST_PATH` while discarding images which it fails to crop. Optional --verbose argument prints out information about each image. The additional information includes the following:
-- `window_location`: location of cropping window w.r.t. original dicom image so that segmentation map can be cropped in the same way for training.
-- `rightmost_points`: rightmost nonzero pixels after correctly being flipped.
-- `bottommost_points`: bottommost nonzero pixels after correctly being flipped.
-- `distance_from_starting_side`: records if zero-value gap between the edge of the image and the breast is found in the side where the breast starts to appear and thus should have been no gap. Depending on the dataset, this value can be used to determine wrong value of `horizontal_flip`.
-
-
-#### Calculate optimal centers
-```bash
-python3 src/optimal_centers/get_optimal_centers.py \
-    --cropped-exam-list-path $CROPPED_EXAM_LIST_PATH \
-    --data-prefix $CROPPED_IMAGE_PATH \
-    --output-exam-list-path $EXAM_LIST_PATH \
-    --num-processes $NUM_PROCESSES
-```
-`src/optimal_centers/get_optimal_centers.py` outputs new exam list with additional metadata to `$EXAM_LIST_PATH`. The additional information includes the following:
-- `best_center`: optimal center point of the window for each image. The augmentation windows drawn with `best_center` as exact center point could go outside the boundary of the image. This usually happens when the cropped image is smaller than the window size. In this case, we pad the image and shift the window to be inside the padded image in augmentation. Refer to [the data report](https://cs.nyu.edu/~kgeras/reports/datav1.0.pdf) for more details.
-
-#### Outcomes of preprocessing
-After the preprocessing step, you should have the following files in the `$OUTPUT_PATH` directory (default is sample_output):
-- cropped_images: a folder that contains the cropped images corresponding to all images in the sample_data/images.
-- data.pkl: the pickle file of a data list that includes the preprocessing metadata for each image and exam.
-
-
-## Reference
-
-If you found this code useful, please cite our paper:
-
-**An interpretable classifier for high-resolution breast cancer screening images utilizing weakly supervised localization**\
-Yiqiu Shen, Nan Wu, Jason Phang, Jungkyu Park, Kangning Liu, Sudarshini Tyagi, Laura Heacock, S. Gene Kim, Linda Moy, Kyunghyun Cho and Krzysztof J. Geras\
-Medical Image Analysis
-2020
-    
-    @article{shen2020interpretable, 
-    title={An interpretable classifier for high-resolution breast cancer screening images utilizing weakly supervised localization},
-    author={Shen, Yiqiu and Wu, Nan and Phang, Jason and Park, Jungkyu and Liu, Kangning and Tyagi, Sudarshini and Heacock, Laura and Kim, S Gene and Moy, Linda and Cho, Kyunghyun and others},
-    journal={Medical Image Analysis},
-    pages={101908},
-    year={2020},
-    publisher={Elsevier}
-}
-
-
-Reference to previous GMIC version:
-
-**Globally-Aware Multiple Instance Classifier for Breast Cancer Screening**\
-Yiqiu Shen, Nan Wu, Jason Phang, Jungkyu Park, S. Gene Kim, Linda Moy, Kyunghyun Cho and Krzysztof J. Geras\
-Machine Learning in Medical Imaging - 10th International Workshop, MLMI 2019, Held in Conjunction with MICCAI 2019, Proceedings. Springer , 2019. p. 18-26 (Lecture Notes in Computer Science (including subseries Lecture Notes in Artificial Intelligence and Lecture Notes in Bioinformatics); Vol. 11861 LNCS).
-    
-    @inproceedings{shen2019globally, 
-    title={Globally-Aware Multiple Instance Classifier for Breast Cancer Screening},
-        author={Shen, Yiqiu and Wu, Nan and Phang, Jason and Park, Jungkyu and Kim, Gene and Moy, Linda and Cho, Kyunghyun and Geras, Krzysztof J},
-        booktitle={Machine Learning in Medical Imaging: 10th International Workshop, MLMI 2019, Held in Conjunction with MICCAI 2019, Shenzhen, China, October 13, 2019, Proceedings},
-        volume={11861},
-        pages={18-26},
-        year={2019},
-        organization={Springer Nature}}
+GNU Affero General Public License v3.0 (AGPLv3). This is a derivative of GMIC
+(© 2020 the GMIC authors, NYU) and remains under the same license; the
+federated-learning additions are © 2026 Shepherd Research Lab, University of
+Hawaiʻi Cancer Center. See [LICENSE](LICENSE) and [NOTICE](NOTICE).

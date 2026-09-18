@@ -1,5 +1,11 @@
 # ============================================================================
 # bc_executor.py - NVFLARE Executor with flexible CSV/PKL input
+#
+# Part of a federated-learning extension of GMIC (https://github.com/nyukat/GMIC).
+# Original GMIC: Copyright (C) 2020 the GMIC authors (NYU), licensed under GNU AGPLv3.
+# Federated-learning additions: Copyright (C) 2026 Shepherd Research Lab,
+# University of Hawaiʻi Cancer Center. Added 2026; likewise licensed under GNU
+# AGPLv3. See LICENSE and NOTICE.
 # ============================================================================
 
 import os

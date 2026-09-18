@@ -1,5 +1,8 @@
 #!/usr/bin/env python
-"""Run per-race subgroup fairness (subgroup_fairness.py) for EVERY method, Site A (UHCC).
+# Part of the federated-learning extension of GMIC.
+# Copyright (C) 2026 Shepherd Research Lab, University of Hawaiʻi Cancer Center.
+# Licensed under GNU AGPLv3 (see LICENSE and NOTICE).
+"""Run per-race subgroup fairness (subgroup_fairness.py) for EVERY method, one site.
 
 For each method it finds the deployed model's best-VALIDATION round (breast-level UHCC val
 AUC, the same operating point the paper selects), then runs subgroup_fairness.run() on that
