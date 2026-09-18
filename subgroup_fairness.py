@@ -33,7 +33,7 @@ Run once per deployed model (Ditto r49, then pretrained r0) to show whether pers
 narrows any per-group sensitivity gap. Works in a notebook too:
   from subgroup_fairness import run; run("pred.csv","meta.csv",val_csv="val.csv")
 """
-import argparse, csv, os, sys
+import argparse, csv, json, os, sys
 from collections import defaultdict
 import numpy as np
 from sklearn.metrics import roc_curve
@@ -45,33 +45,60 @@ N_BOOT = 2000
 SEED = 0
 FIXED_SPEC = 0.90      # sensitivity at this specificity
 FIXED_SENS = 0.90      # specificity at this sensitivity
-ASIAN_SUBGROUPS = True # also break Asian into Japanese/Filipino/Chinese/Korean
 MIN_POS = 5            # groups with fewer positives flagged as unstable
 STRICT_MATCH = True    # hard-fail if any prediction breast has no metadata match
+
+# Default race/ethnicity code -> reporting-group map. The "code" is the text before the first
+# ')' in the race column value (e.g. '5) NHOPI' -> '5'), lower-cased; keys are matched as
+# PREFIXES, longest first, so '3a' wins over '3'. Reserved keys "_default" (code present but
+# unmapped) and "_blank" (value missing) set the catch-all labels. Override the whole map at
+# runtime with --eth-map <json> so the tool need not carry any site-specific scheme.
+DEFAULT_ETH_MAP = {
+    "5":  "NHPI",
+    "2":  "White",
+    "3a": "Asian: Japanese", "3b": "Asian: Chinese",
+    "3c": "Asian: Filipino", "3d": "Asian: Korean",
+    "3":  "Asian: Other",              # any other 3x code
+    "_default": "Other",               # e.g. 1 Hispanic, 4 Black, 6 AIAN
+    "_blank":   "Unknown",             # race column empty/missing
+}
 
 # ---------------- helpers ----------------
 def _stem(p):
     """Basename without extension: '/a/b/10033_10033_20060416_L_CC.png' -> that id string."""
     return os.path.splitext(os.path.basename(str(p).replace("\\", "/")))[0]
 
-def eth_to_group(desc):
-    """Map ETH_DESCR to a reporting group. VERIFY against the printed [eth-map] table below
-    and adjust here if your ETH_DESCR strings don't use the '5) ...', '3a) ...' code prefix."""
+def eth_to_group(desc, mapping=None):
+    """Map a race/ethnicity description to a reporting group via `mapping` (default
+    DEFAULT_ETH_MAP). Non-reserved keys are matched as prefixes of the parsed code, longest
+    first. VERIFY against the [eth-map] audit the run prints before trusting the groups."""
+    mapping = DEFAULT_ETH_MAP if mapping is None else mapping
     d = (desc or "").strip()
     if not d:
-        return "Unknown"
+        return mapping.get("_blank", "Unknown")
     code = d.split(")")[0].strip().lower()
-    if code.startswith("5"): return "NHPI"           # 5) NHOPI
-    if code.startswith("2"): return "White"
-    if code.startswith("3"):                          # 3x) Asian, ...
-        if ASIAN_SUBGROUPS:
-            return {"3a": "Asian: Japanese", "3b": "Asian: Chinese",
-                    "3c": "Asian: Filipino", "3d": "Asian: Korean"}.get(code, "Asian: Other")
-        return "Asian"
-    return "Other"                                     # 1 Hispanic, 4 Black, 6 AIAN, ...
+    for k in sorted((x for x in mapping if not str(x).startswith("_")), key=len, reverse=True):
+        if code.startswith(str(k).lower()):
+            return mapping[k]
+    return mapping.get("_default", "Other")
 
-def eth_to_asian_parent(desc):
-    return (desc or "").strip().split(")")[0].strip().lower().startswith("3")
+def is_asian_group(desc, mapping=None):
+    """True if desc resolves to any 'Asian...' group (drives the aggregated 'Asian (all)' row)."""
+    return eth_to_group(desc, mapping).startswith("Asian")
+
+def group_order(mapping):
+    """Row order for whatever groups `mapping` yields: Overall, then each distinct group (with an
+    'Asian (all)' aggregate inserted before the first 'Asian:' subgroup), then the blank label."""
+    seen, ordered, asian_done = [], ["Overall"], False
+    for k, g in mapping.items():
+        if str(k).startswith("_") or g in seen:
+            continue
+        seen.append(g)
+        if g.startswith("Asian:") and not asian_done:
+            ordered.append("Asian (all)"); asian_done = True
+        ordered.append(g)
+    ordered.append(mapping.get("_blank", "Unknown"))
+    return ordered
 
 def load(path):
     with open(path, newline="", encoding="utf-8-sig") as f:
@@ -167,10 +194,13 @@ def youden(y, s):
     fpr, tpr, thr = roc_curve(y, s); return float(thr[int(np.argmax(tpr - fpr))])
 
 # ---------------- main ----------------
-def run(pred_csv, meta_csv, threshold=None, val_csv=None, out_csv=None):
+def run(pred_csv, meta_csv, threshold=None, val_csv=None, out_csv=None,
+        site="UHCC", eth_col="ETH_DESCR", eth_code_col="ETH", eth_map=None):
+    eth_map = DEFAULT_ETH_MAP if eth_map is None else eth_map
+    blank_label = eth_map.get("_blank", "Unknown")
     preds = load(pred_csv)
     print(f"[cols] prediction file columns: {list(preds[0].keys())}")
-    meta = load_meta(meta_csv)
+    meta = load_meta(meta_csv, eth_col=eth_col, eth_code_col=eth_code_col)
     print(f"[meta] indexed {len(meta)} image keys from {os.path.basename(meta_csv)}")
 
     probs, labs, info, unmatched = breast_aggregate(preds, meta)
@@ -194,14 +224,14 @@ def run(pred_csv, meta_csv, threshold=None, val_csv=None, out_csv=None):
     print(f"  {'ETH':<6}{'ETH_DESCR':<40}{'-> group':<20}{'breasts':>8}")
     n_unknown = 0
     for (code, descr), c in sorted(seen.items(), key=lambda kv: -kv[1]):
-        g = eth_to_group(descr)
-        if g == "Unknown": n_unknown += c
+        g = eth_to_group(descr, eth_map)
+        if g == blank_label: n_unknown += c
         dshow = (descr or "<blank>")
         if len(dshow) > 38: dshow = dshow[:37] + "…"
         print(f"  {code:<6}{dshow:<40}{g:<20}{c:>8}")
     if n_unknown:
-        print(f"[warn] {n_unknown} breasts mapped to 'Unknown' -- if that's unexpected, "
-              f"fix eth_to_group() to match the ETH_DESCR strings above.")
+        print(f"[warn] {n_unknown} breasts mapped to '{blank_label}' -- if that's unexpected, "
+              f"fix the map (built-in DEFAULT_ETH_MAP or --eth-map) to match the values above.")
 
     # --- operating threshold ---
     if threshold is None:
@@ -219,12 +249,12 @@ def run(pred_csv, meta_csv, threshold=None, val_csv=None, out_csv=None):
 
     groups = defaultdict(list)
     for k in keys:
-        groups[eth_to_group(info[k]["eth_descr"])].append(k)
-    if ASIAN_SUBGROUPS:
-        groups["Asian (all)"] = [k for k in keys if eth_to_asian_parent(info[k]["eth_descr"])]
+        groups[eth_to_group(info[k]["eth_descr"], eth_map)].append(k)
+    asian = [k for k in keys if is_asian_group(info[k]["eth_descr"], eth_map)]
+    if asian and any(g.startswith("Asian:") for g in groups):
+        groups["Asian (all)"] = asian
 
-    order = ["Overall", "NHPI", "Asian (all)", "Asian: Japanese", "Asian: Filipino",
-             "Asian: Chinese", "Asian: Korean", "Asian: Other", "White", "Other", "Unknown"]
+    order = group_order(eth_map)
     rows = []
     for g in order:
         ks = keys if g == "Overall" else groups.get(g, [])
@@ -236,7 +266,7 @@ def run(pred_csv, meta_csv, threshold=None, val_csv=None, out_csv=None):
                      om["spec"], om["ppv"], om["fpr"],
                      sens_at_spec(y, s, FIXED_SPEC), spec_at_sens(y, s, FIXED_SENS)))
 
-    print(f"\nSite A (UHCC) subgroup metrics | thr={threshold:.4f} | "
+    print(f"\n{site} subgroup metrics | thr={threshold:.4f} | "
           f"sens@spec={FIXED_SPEC} | spec@sens={FIXED_SENS}\n")
     h = (f"{'group':<17}{'N':>5}{'pos':>4}  {'AUC [95% DeLong]':<21}"
          f"{'sens':>7}{'[95% CI]':>16}{'spec':>7}{'PPV':>7}{'FPR':>7}{'s@sp':>7}{'sp@s':>7}")
@@ -273,5 +303,15 @@ if __name__ == "__main__":
     ap.add_argument("--val", default=None, help="optional Site A validation prediction CSV (Youden operating point)")
     ap.add_argument("--threshold", type=float, default=None, help="fixed operating threshold (overrides --val)")
     ap.add_argument("--out", default=None, help="output CSV path (default: <pred_stem>_subgroups.csv in cwd)")
+    ap.add_argument("--site", default="UHCC", help="site label for the output header")
+    ap.add_argument("--eth-col", default="ETH_DESCR", help="registry column holding the race/ethnicity description")
+    ap.add_argument("--eth-code-col", default="ETH", help="registry column holding the race/ethnicity code")
+    ap.add_argument("--eth-map", default=None,
+                    help="JSON {code: group} (+ optional _default/_blank) overriding the built-in race map")
     a = ap.parse_args()
-    run(a.pred, a.meta, threshold=a.threshold, val_csv=a.val, out_csv=a.out)
+    emap = None
+    if a.eth_map:
+        with open(a.eth_map, encoding="utf-8") as f:
+            emap = json.load(f)
+    run(a.pred, a.meta, threshold=a.threshold, val_csv=a.val, out_csv=a.out,
+        site=a.site, eth_col=a.eth_col, eth_code_col=a.eth_code_col, eth_map=emap)

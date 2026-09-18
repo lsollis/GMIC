@@ -20,10 +20,13 @@ import glob, os, re, sys
 from sklearn.metrics import roc_auc_score
 import subgroup_fairness as sf
 
-SITE = "UHCC"
+SITE = "UHCC"                 # client name: both the prediction-file prefix and the output label
 META = "data/gmic_df_UHCC_full_20260604_113112.csv"
 PROC = "data/processed"
 OUTDIR = "subgroup_out"
+ETH_COL = "ETH_DESCR"         # registry column with the race/ethnicity description
+ETH_CODE_COL = "ETH"          # registry column with the race/ethnicity code
+ETH_MAP_FILE = None           # path to a JSON {code: group} map, or None for subgroup_fairness's built-in
 
 # label, run_dir, file tag, round (None = auto best-val; int = pin, e.g. 0 for pretrained)
 METHODS = [
@@ -61,7 +64,12 @@ def best_val_round(run_dir, tag, meta):
 def main():
     if not os.path.isfile(META):
         sys.exit(f"[fatal] meta CSV not found: {META} (run from /workspace)")
-    meta = sf.load_meta(META)
+    eth_map = None
+    if ETH_MAP_FILE:
+        import json
+        with open(ETH_MAP_FILE, encoding="utf-8") as f:
+            eth_map = json.load(f)
+    meta = sf.load_meta(META, eth_col=ETH_COL, eth_code_col=ETH_CODE_COL)
     os.makedirs(OUTDIR, exist_ok=True)
 
     combined = []          # (method, row-tuple) for the merged CSV
@@ -87,7 +95,8 @@ def main():
         print(f"### {label}: tag={tag} round={rnd}{vtxt}")
         out = os.path.join(OUTDIR, f"subgroup_{label}.csv")
         try:
-            rows = sf.run(test, META, val_csv=(val if os.path.isfile(val) else None), out_csv=out)
+            rows = sf.run(test, META, val_csv=(val if os.path.isfile(val) else None), out_csv=out,
+                          site=SITE, eth_col=ETH_COL, eth_code_col=ETH_CODE_COL, eth_map=eth_map)
         except SystemExit as e:               # subgroup_fairness aborts on an unmatched row
             print(f"### {label}: ABORTED -- {e}")
             continue
