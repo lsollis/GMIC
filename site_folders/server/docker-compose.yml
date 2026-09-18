@@ -35,9 +35,11 @@ services:
     stdin_open: true
     tty: true
 
-    # ✅ Run server in foreground so logs are real logs
+    # ✅ Run server in foreground so logs are real logs.
+    # Set ORG_NAME (in a .env file or the shell) to the server org from your provisioning
+    # project (gmic-localhost.yml); it must match the server participant's org.
     command: >
       bash -lc "python -u -m nvflare.private.fed.app.server.server_train
       -m /workspace
       -s fed_server.json
-      --set secure_train=true config_folder=config org=HIPIMR"
+      --set secure_train=true config_folder=config org=${ORG_NAME:-example_org}"

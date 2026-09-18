@@ -38,9 +38,9 @@ GMIC_PARAMS = {
     "percent_t": 0.02, "lambda_l1": 1e-5,
 }
 
-CKPT = os.path.normpath(os.path.join(
-    THIS_DIR, "..", "..", "..", "site_folders", "Moffitt", "models", "sample_model_5.p"
-))
+# Optional GMIC pretrained warm-start (not shipped in-repo -- download the 5 sample_model_*.p
+# weights from https://github.com/nyukat/GMIC). The pretrained-load check skips if absent.
+CKPT = os.environ.get("GMIC_PRETRAINED", "/workspace/models/sample_model_5.p")
 
 
 def build_model():

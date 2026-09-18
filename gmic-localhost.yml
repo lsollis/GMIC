@@ -22,9 +22,12 @@ participants:
   - name: HIPIMR
     type: client
     org: HIPIMR
-  - name: Moffitt
+  - name: RSNA-US
     type: client
-    org: Moffitt
+    org: RSNA-US
+  - name: RSNA-AU
+    type: client
+    org: RSNA-AU
   - name: admin@example.org
     type: admin
     org: HIPIMR

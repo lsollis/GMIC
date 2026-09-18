@@ -57,6 +57,8 @@ cross-demographic equity:
 | `run_all_subgroups.py` | Runs `subgroup_fairness.py` across every method and builds a combined table. |
 | `dump_ditto_perround_preds.py` | Dumps per-round predictions for personalized (Ditto) runs. |
 | `tools/` | Operational helpers (salvage/resume runbooks). |
+| `site_folders/` | Deployment templates: NVFLARE server/client Docker kits and a CSV→GMIC converter. |
+| `gmic-localhost.yml`, `master_template.yml` | NVFLARE provisioning: project spec + workspace template. |
 
 All six job folders carry a **byte-identical** copy of `bc_executor.py` (NVFLARE
 requires per-job custom code); change one and re-copy to keep them in sync.
@@ -74,6 +76,38 @@ Each site provides a metadata CSV (see
 for the schema: `patient_id, exam_id, laterality, view, file_path,
 exam_level_label, view_level_label, split_group, ...`). No patient data is
 included in this repository.
+
+The GMIC pretrained weights (the FL warm-start, `sample_model_1..5.p`) are **not**
+shipped here — download them from the [GMIC repository](https://github.com/nyukat/GMIC)
+and place them where your config expects (default `/workspace/models/`).
+
+## Deploying the federated system
+
+Deployment has two layers. NVFLARE provisioning generates each participant's FL
+startup kit; a small Docker template wraps it into a runnable container.
+
+1. **Provision the startup kits.** `gmic-localhost.yml` is the NVFLARE project
+   spec (server, clients, admin) and `master_template.yml` is the standard
+   NVFLARE workspace template. Edit the participant list to your sites, then:
+
+   ```bash
+   nvflare provision -p gmic-localhost.yml
+   ```
+
+   This writes a startup kit per participant (certificates, `fed_server.json` /
+   `fed_client.json`, `start.sh`, `sub_start.sh`, `docker.sh`).
+
+2. **Wrap each kit in a container.** `site_folders/server/` and
+   `site_folders/client/` are **templates** — a `Dockerfile`, a
+   `docker-compose.yml`, and a run script — for the server and for a client.
+   Copy the matching template alongside a participant's startup kit, set the
+   placeholders (`ORG_NAME` for the server; `SITE_NAME` for a client, matching
+   the provisioned participant name), and run `run_server.sh` / `run_client.sh`.
+   `site_folders/csv_to_gmic_converter.py` helps convert a site's registry into
+   the expected metadata schema.
+
+> These are templates, not our production kits: a deployer provisions their own
+> project (their hosts, their certificates) rather than reusing ours.
 
 ## Configuring a federated method
 
