@@ -25,7 +25,7 @@ participants:
   - name: Moffitt
     type: client
     org: Moffitt
-  - name: lsollis@cc.hawaii.edu
+  - name: admin@example.org
     type: admin
     org: UHCC
     role: project_admin

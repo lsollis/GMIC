@@ -10,7 +10,7 @@ round's test preds with the matching val preds for the Youden threshold. Writes 
 method plus a combined table, and prints a group x method pivot of sens@spec (the equity
 headline). Pretrained baseline is fixed at round 0.
 
-Run from /workspace (== /raid/home/lsollis/GMIC/GMIC):
+Run from /workspace (the repo root inside the container):
     python run_all_subgroups.py
 Edit METHODS below if a folder name differs, or pin a round by replacing None with an int.
 

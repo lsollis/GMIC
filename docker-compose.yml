@@ -5,14 +5,15 @@ services:
       dockerfile: Dockerfile
     container_name: gmic_fl_container
     network_mode: host
+    # Host paths come from a .env file (or your shell): set REPO_ROOT to your checkout of this
+    # repo and DATA_ROOT to the directory holding the datasets. Left side of each ':' is the host
+    # path; right side is the fixed path inside the container.
     volumes:
-      #- /home/lsollis/Documents/GitHub/GMIC:/workspace
-      #- /home/lsollis/Downloads/XAI_output:/workspace/data/XAI_output
-      - /raid/home/lsollis/GMIC/GMIC:/workspace
-      - /raid/home/lsollis/data/rsna-dataset:/workspace/data/rsna-dataset
-      - /raid/home/lsollis/data/p7_pngs:/workspace/data/p7_pngs
-      - /raid/home/lsollis/data/gmic_format_xai.csv:/workspace/data/gmic_format_xai.csv
-      - /raid/home/lsollis/data/p7_xai_covar_250228.csv:/workspace/data/p7_xai_covar_250228.csv
+      - ${REPO_ROOT:-.}:/workspace
+      - ${DATA_ROOT}/rsna-dataset:/workspace/data/rsna-dataset
+      - ${DATA_ROOT}/p7_pngs:/workspace/data/p7_pngs
+      - ${DATA_ROOT}/gmic_format_xai.csv:/workspace/data/gmic_format_xai.csv
+      - ${DATA_ROOT}/p7_xai_covar_250228.csv:/workspace/data/p7_xai_covar_250228.csv
       # Optional mounts for demo/testing - enable as needed
       # - ../GMIC-mods/data:/workspace/data
       # - ../GMIC-mods/demo/input_metadata.csv:/workspace/demo/input_metadata.csv
