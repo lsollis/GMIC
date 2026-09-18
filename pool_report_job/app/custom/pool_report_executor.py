@@ -3,7 +3,7 @@ breast-aggregate them, and return the (prob, label) arrays so the server can poo
 
 No model, no GPU, no cross-site data access -- the salvage already wrote each site's predictions to
 its results_dir; this just reads them and ships the de-identified breast-level scores+labels over the
-FL channel. That is what lets the server log a true pooled AUC for a site (e.g. HPU) whose files you
+FL channel. That is what lets the server log a true pooled AUC for a site (e.g. RSNA-AU) whose files you
 cannot reach directly.
 """
 import csv

@@ -59,13 +59,13 @@ def test_heartbeat_fires_while_the_main_thread_is_blocked():
     with tempfile.TemporaryDirectory() as td:
         ex = make_executor("ditto_modulewise", td, heartbeat_interval_s=1)
         cap = _attach(ex)
-        state = {"site": "HPU", "batch": 37, "stage": "forward", "t_last_progress": time.time()}
+        state = {"site": "RSNA-AU", "batch": 37, "stage": "forward", "t_last_progress": time.time()}
         with ex._heartbeat("ditto-personal", state):
             time.sleep(2.5)  # stand-in for a blocked CUDA kernel / stalled mount read
         beats = [l for l in cap.lines if "[heartbeat]" in l]
         assert beats, "heartbeat produced NO output while the main thread was blocked"
         assert any("batch=37" in l for l in beats), f"heartbeat lost the position: {beats}"
-        assert any("HPU" in l for l in beats), f"heartbeat lost the site: {beats}"
+        assert any("RSNA-AU" in l for l in beats), f"heartbeat lost the site: {beats}"
         # the stage is what separates an I/O stall from a compute stall remotely
         assert any("stage=forward" in l for l in beats), f"heartbeat lost the stage: {beats}"
     print(f"[progress] heartbeat fired {len(beats)}x from a blocked thread. OK")
@@ -76,7 +76,7 @@ def test_heartbeat_stops_after_the_phase_and_never_raises():
     with tempfile.TemporaryDirectory() as td:
         ex = make_executor("ditto_modulewise", td, heartbeat_interval_s=1)
         cap = _attach(ex)
-        with ex._heartbeat("evaluate", {"site": "HPU", "t_last_progress": time.time()}):
+        with ex._heartbeat("evaluate", {"site": "RSNA-AU", "t_last_progress": time.time()}):
             time.sleep(1.5)
         n_after_exit = len([l for l in cap.lines if "[heartbeat]" in l])
         time.sleep(2.5)  # would emit more beats if the thread had leaked
@@ -90,7 +90,7 @@ def test_heartbeat_disabled_by_zero_interval():
     with tempfile.TemporaryDirectory() as td:
         ex = make_executor("ditto_modulewise", td, heartbeat_interval_s=0)
         cap = _attach(ex)
-        with ex._heartbeat("ditto-personal", {"site": "HPU", "t_last_progress": time.time()}):
+        with ex._heartbeat("ditto-personal", {"site": "RSNA-AU", "t_last_progress": time.time()}):
             time.sleep(1.5)
         assert not [l for l in cap.lines if "[heartbeat]" in l], "heartbeat ran while disabled"
     print("[progress] heartbeat_interval_s=0 disables it. OK")
@@ -150,7 +150,7 @@ def test_heartbeat_distinguishes_loader_stall_from_compute_stall():
     with tempfile.TemporaryDirectory() as td:
         ex = make_executor("ditto_modulewise", td, heartbeat_interval_s=1)
         cap = _attach(ex)
-        with ex._heartbeat("ditto-personal", {"site": "HPU", "batch": -1, "stage": "load",
+        with ex._heartbeat("ditto-personal", {"site": "RSNA-AU", "batch": -1, "stage": "load",
                                               "t_last_progress": time.time()}):
             time.sleep(1.5)
         beats = [l for l in cap.lines if "[heartbeat]" in l]

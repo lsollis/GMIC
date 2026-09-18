@@ -16,9 +16,9 @@
           "optimizer_name": "adam",
 
           "data_path_map": {
-            "UHCC": "/workspace/data/gmic_df_UHCC_full_20260604_113112.csv",
-            "HPU": "/workspace/data/gmic_df_site2.csv",
-            "RSNA-GCP": "/workspace/data/gmic_df_site1.csv"
+            "HIPIMR": "/workspace/data/gmic_df_HIPIMR_full_20260604_113112.csv",
+            "RSNA-AU": "/workspace/data/gmic_df_site2.csv",
+            "RSNA-US": "/workspace/data/gmic_df_site1.csv"
           },
           "image_path": "/workspace/data/p7_pngs",
           "input_format": "csv",
@@ -58,9 +58,9 @@
           "tolerant_missing_metadata": false,
           "debug_devices": false,
           "use_amp": true,
-          "personal_amp_by_site": {"HPU": false},
-          "personal_batch_size_by_site": {"HPU": 8},
-          "train_batch_size_by_site": {"HPU": 8},
+          "personal_amp_by_site": {"RSNA-AU": false},
+          "personal_batch_size_by_site": {"RSNA-AU": 8},
+          "train_batch_size_by_site": {"RSNA-AU": 8},
           "grad_accumulation": 1,
           "memory_efficient": true,
           "gpus": "0",

@@ -28,7 +28,7 @@ from sklearn.metrics import roc_auc_score
 # Resolve job dirs RELATIVE TO THIS SCRIPT (it lives at the repo root, next to the job folders),
 # so the bc_executor import works regardless of cwd / checkout root (e.g. /workspace vs a host path).
 HERE = os.path.dirname(os.path.abspath(__file__))
-CLIENTS = ["UHCC", "HPU", "RSNA-GCP"]
+CLIENTS = ["HIPIMR", "RSNA-AU", "RSNA-US"]
 # Selectable jobs: key -> (job_dir, output prediction tag). Choose on the command line:
 #   python dump_ditto_perround_preds.py                              # all jobs
 #   python dump_ditto_perround_preds.py mw                           # just module-wise

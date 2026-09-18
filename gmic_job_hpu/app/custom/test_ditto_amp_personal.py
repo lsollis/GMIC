@@ -210,10 +210,10 @@ def test_personal_amp_none_follows_use_amp():
 
 
 def test_personal_amp_by_site_resolves_per_identity():
-    """One config, per-site precision: the override map picks fp32 for HPU, AMP for others.
+    """One config, per-site precision: the override map picks fp32 for RSNA-AU, AMP for others.
 
-    This is the whole point of the map -- HPU's A4000 faults on the fp16 backward, so it must run
-    fp32, while RSNA/UHCC keep AMP, WITHOUT duplicating the app per site. Resolution keys on the FL
+    This is the whole point of the map -- RSNA-AU's A4000 faults on the fp16 backward, so it must run
+    fp32, while RSNA/HIPIMR keep AMP, WITHOUT duplicating the app per site. Resolution keys on the FL
     identity and rebuilds the v scaler to match.
     """
     from nvflare.apis.fl_context import FLContext
@@ -226,41 +226,41 @@ def test_personal_amp_by_site_resolves_per_identity():
         def get_identity_name(self):
             return self._name
 
-    # HPU is in the map -> fp32; a site NOT in the map falls back to the default (use_amp=True).
+    # RSNA-AU is in the map -> fp32; a site NOT in the map falls back to the default (use_amp=True).
     with tempfile.TemporaryDirectory() as td:
         ex = make_executor("ditto_modulewise", td, use_amp=True,
-                           personal_amp_by_site={"HPU": False})
-        ex._resolve_personal_amp(Ctx("HPU"))
-        assert ex._personal_amp is False, "HPU should resolve to fp32 via the override"
+                           personal_amp_by_site={"RSNA-AU": False})
+        ex._resolve_personal_amp(Ctx("RSNA-AU"))
+        assert ex._personal_amp is False, "RSNA-AU should resolve to fp32 via the override"
         assert ex._personal_amp_resolved is True
     with tempfile.TemporaryDirectory() as td:
         ex = make_executor("ditto_modulewise", td, use_amp=True,
-                           personal_amp_by_site={"HPU": False})
-        ex._resolve_personal_amp(Ctx("RSNA-GCP"))
+                           personal_amp_by_site={"RSNA-AU": False})
+        ex._resolve_personal_amp(Ctx("RSNA-US"))
         assert ex._personal_amp is True, "an unlisted site should keep the AMP default"
-    print("[amp] per-site override: HPU->fp32, others->AMP, from one config. OK")
+    print("[amp] per-site override: RSNA-AU->fp32, others->AMP, from one config. OK")
 
 
 def test_personal_amp_override_drives_a_genuinely_fp32_forward():
-    """End-to-end: with the HPU override resolved, the personal forward is actually fp32.
+    """End-to-end: with the RSNA-AU override resolved, the personal forward is actually fp32.
 
-    Resolves as HPU first (memoized), then runs the pass -- the resolved fp32 must reach the
+    Resolves as RSNA-AU first (memoized), then runs the pass -- the resolved fp32 must reach the
     kernels, not just the flag. Asserts on the forward dtypes.
     """
     from nvflare.apis.fl_context import FLContext
 
     class Ctx(FLContext):
         def get_identity_name(self):
-            return "HPU"
+            return "RSNA-AU"
 
     with tempfile.TemporaryDirectory() as td:
         ex = make_executor("ditto_modulewise", td, use_amp=True,
-                           personal_amp_by_site={"HPU": False})
+                           personal_amp_by_site={"RSNA-AU": False})
         ex._resolve_personal_amp(Ctx())  # memoized -> the later run_round reuses it
         assert ex._personal_amp is False and ex._personal_amp_resolved is True
         dtypes = _personal_pass_output_dtypes(ex, GMIC(copy.deepcopy(GMIC_PARAMS)), False)
         assert all(d == torch.float32 for d in dtypes), \
-            f"HPU personal forward was not fp32 despite the override (got {set(dtypes)})"
+            f"RSNA-AU personal forward was not fp32 despite the override (got {set(dtypes)})"
     print("[amp] per-site fp32 override drives a genuinely fp32 forward. OK")
 
 

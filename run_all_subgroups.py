@@ -4,7 +4,7 @@
 # Licensed under GNU AGPLv3 (see LICENSE and NOTICE).
 """Run per-race subgroup fairness (subgroup_fairness.py) for EVERY method, one site.
 
-For each method it finds the deployed model's best-VALIDATION round (breast-level UHCC val
+For each method it finds the deployed model's best-VALIDATION round (breast-level HIPIMR val
 AUC, the same operating point the paper selects), then runs subgroup_fairness.run() on that
 round's test preds with the matching val preds for the Youden threshold. Writes one CSV per
 method plus a combined table, and prints a group x method pivot of sens@spec (the equity
@@ -23,8 +23,8 @@ import glob, os, re, sys
 from sklearn.metrics import roc_auc_score
 import subgroup_fairness as sf
 
-SITE = "UHCC"                 # client name: both the prediction-file prefix and the output label
-META = "data/gmic_df_UHCC_full_20260604_113112.csv"
+SITE = "HIPIMR"                 # client name: both the prediction-file prefix and the output label
+META = "data/gmic_df_HIPIMR_full_20260604_113112.csv"
 PROC = "data/processed"
 OUTDIR = "subgroup_out"
 ETH_COL = "ETH_DESCR"         # registry column with the race/ethnicity description
@@ -48,7 +48,7 @@ def _round_of(path):
 
 
 def best_val_round(run_dir, tag, meta):
-    """Highest breast-level UHCC val AUC across all dumped rounds for this tag."""
+    """Highest breast-level HIPIMR val AUC across all dumped rounds for this tag."""
     best_r, best_auc = None, -1.0
     for vp in sorted(glob.glob(os.path.join(run_dir, f"{SITE}_predictions_{tag}_round*_val.csv"))):
         r = _round_of(vp)

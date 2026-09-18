@@ -26,7 +26,7 @@ In `config_fed_server.json` set `"num_rounds"` to your target (e.g. 60), aggrega
 stock (already reverted). Submit the job. Each node writes its `incoming_global/` trajectory to its
 `results_dir`.
 
-**Surviving nightly HPU crashes (numbering is now resume-safe).** Every per-round artifact is stamped
+**Surviving nightly RSNA-AU crashes (numbering is now resume-safe).** Every per-round artifact is stamped
 `current_round + resume_from_local_round`, so a resumed segment continues the logical numbering instead
 of overwriting round 0. Per crash:
 1. Find the last **completed** logical round `N` (highest `incoming_global_round_{N}.pth`).
@@ -44,12 +44,12 @@ Data is siloed, so the replay runs **per node** on that node's local data + its 
 environment (it imports the same `app/custom`) and run, with `--clients` = that one site:
 
 ```bash
-# on the UHCC node
-python replay_sweep.py --base-job <gmic_job_hpu> --clients UHCC \
-  --traj-dir <run>/incoming_global --traj-prefix UHCC \
+# on the HIPIMR node
+python replay_sweep.py --base-job <gmic_job_hpu> --clients HIPIMR \
+  --traj-dir <run>/incoming_global --traj-prefix HIPIMR \
   --lambdas 0.05,0.1,0.5 --gpu 0 --out uhcc_replay.json
-# on the HPU node (Windows OK)        -> --clients HPU --traj-prefix HPU --out hpu_replay.json
-# on the RSNA node                    -> --clients RSNA-GCP --traj-prefix RSNA-GCP --out rsna_replay.json
+# on the RSNA-AU node (Windows OK)        -> --clients RSNA-AU --traj-prefix RSNA-AU --out hpu_replay.json
+# on the RSNA node                    -> --clients RSNA-US --traj-prefix RSNA-US --out rsna_replay.json
 ```
 
 Run the **same** `--lambdas` (or the same module-wise grid: `--modulewise --anchor 0.1
@@ -73,15 +73,15 @@ That prints the same sweep table as the interleaved launcher and picks the worst
 ### Fallback: interleaved Ditto real-world (no replay)
 
 Fully wired (`"method": "ditto"`, `"ditto_lambda": L`) — but each λ is a **full federated run that
-recomputes FedAvg** and is subject to HPU crashes (resume via the same offset procedure). Use only if
+recomputes FedAvg** and is subject to RSNA-AU crashes (resume via the same offset procedure). Use only if
 the per-node replay is impractical; it's N× the cost.
 
 ---
 
-## Last-ditch: everything in the simulator (no HPU)
+## Last-ditch: everything in the simulator (no RSNA-AU)
 
 If real-world can't finish in time, run the whole thing in the simulator on the DGX (all sites' data
-local) — same data/seed, so results are consistent, and HPU is out of the loop entirely:
+local) — same data/seed, so results are consistent, and RSNA-AU is out of the loop entirely:
 
 ```bash
 # one FedAvg run that caches the trajectory
@@ -89,8 +89,8 @@ python ditto_sweep/launcher.py --base-job ../gmic_job --fedavg --rounds 60 \
   --gpu-pools "0,1,2" --output-base /workspace/sim/fedavg --work-root /workspace/sim/fedavg_runs
 # central replay (all sites on one box -> no --combine needed)
 python ditto_sweep/replay_sweep.py --base-job ../gmic_job \
-  --traj-dir /workspace/sim/fedavg/fedavg/UHCC/incoming_global --traj-prefix UHCC \
-  --lambdas 0.05,0.1,0.5 --clients UHCC,HPU,RSNA-GCP --gpu 0 --out /workspace/sim/ditto_replay.json
+  --traj-dir /workspace/sim/fedavg/fedavg/HIPIMR/incoming_global --traj-prefix HIPIMR \
+  --lambdas 0.05,0.1,0.5 --clients HIPIMR,RSNA-AU,RSNA-US --gpu 0 --out /workspace/sim/ditto_replay.json
 ```
 
 ## Why replay == interleaved (and the one caveat)

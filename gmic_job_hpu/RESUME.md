@@ -1,6 +1,6 @@
 # Resuming the module-wise Ditto run after a crash
 
-HPU's 16 GiB A4000 can't hold the fp32 personal pass (it overflows to ~22 GiB, oversubscribes to
+RSNA-AU's 16 GiB A4000 can't hold the fp32 personal pass (it overflows to ~22 GiB, oversubscribes to
 host RAM, and thrashes at ~2.3 hr/round), so the run progresses slowly and dies every ~20 rounds
 (as `1dc61297` did). That's accepted — the plan is crash → resume → repeat until 60 rounds finish.
 This is the procedure. It is safe to repeat any number of times; round numbering stays contiguous.
@@ -29,7 +29,7 @@ that's how the original round-20 resume worked).
    ```
 
    It prints `resume_from_local_round` and the server `num_rounds`. (Manual equivalent: the highest
-   `{site}_gmic_model_round_N.pth` present for HPU — HPU is the crasher, so its highest is the safe
+   `{site}_gmic_model_round_N.pth` present for RSNA-AU — RSNA-AU is the crasher, so its highest is the safe
    minimum.)
 
 2. **Edit `app/config/config_fed_client.json`:**
@@ -44,7 +44,7 @@ that's how the original round-20 resume worked).
 4. **Resubmit** the job. At raw round 0 each client re-submits its cached round-N weights UNTRAINED;
    the server's weighted aggregation reconstructs the round-N global, `v` is restored from its
    round-N ckpt, and training continues at logical N+1. Confirm in the log:
-   - `[resume] loaded HPU round-N weights ... submitting UNTRAINED for server re-aggregation`
+   - `[resume] loaded RSNA-AU round-N weights ... submitting UNTRAINED for server re-aggregation`
    - `[resume] restored personal model v <- ...`  (the `v` optimizer's Adam moments are rebuilt
      fresh — never persisted — and re-warm within a few steps; this is the only lossy part.)
 

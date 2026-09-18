@@ -1,7 +1,7 @@
 {
   "name": "gmic_job_ditto_mw_sim",
   "min_clients": 3,
-  "mandatory_clients": ["UHCC", "HPU", "RSNA-GCP"],
+  "mandatory_clients": ["HIPIMR", "RSNA-AU", "RSNA-US"],
   "deploy_map": {
     "app": ["@ALL"]
   }

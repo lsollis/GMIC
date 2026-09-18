@@ -16,9 +16,9 @@
           "optimizer_name": "adam",
 
           "data_path_map": {
-            "UHCC": "/workspace/data/archived_data_csvs/gmic_df_UHCC_full_20260604_113112.csv",
-            "HPU": "/workspace/data/archived_data_csvs/gmic_df_site2.csv",
-            "RSNA-GCP": "/workspace/data/archived_data_csvs/gmic_df_site1.csv"
+            "HIPIMR": "/workspace/data/archived_data_csvs/gmic_df_HIPIMR_full_20260604_113112.csv",
+            "RSNA-AU": "/workspace/data/archived_data_csvs/gmic_df_site2.csv",
+            "RSNA-US": "/workspace/data/archived_data_csvs/gmic_df_site1.csv"
           },
           "image_path": "/workspace/data",
           "input_format": "csv",
@@ -32,9 +32,9 @@
 
           "output_dir": "/workspace/sim/fedprox_mu0.1/{site}",
           "preprocess_cache_dir_map": {
-            "UHCC": "/workspace/data/processed/fedprox_3client",
-            "HPU": "/workspace/data/processed/ditto_sim_cache/HPU",
-            "RSNA-GCP": "/workspace/data/processed/ditto_sim_cache/RSNA-GCP"
+            "HIPIMR": "/workspace/data/processed/fedprox_3client",
+            "RSNA-AU": "/workspace/data/processed/ditto_sim_cache/RSNA-AU",
+            "RSNA-US": "/workspace/data/processed/ditto_sim_cache/RSNA-US"
           },
           "num_processes": 4,
 

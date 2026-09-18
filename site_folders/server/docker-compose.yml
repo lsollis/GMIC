@@ -40,4 +40,4 @@ services:
       bash -lc "python -u -m nvflare.private.fed.app.server.server_train
       -m /workspace
       -s fed_server.json
-      --set secure_train=true config_folder=config org=UHCC"
+      --set secure_train=true config_folder=config org=HIPIMR"

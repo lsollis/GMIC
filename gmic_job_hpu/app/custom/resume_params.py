@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Compute the exact resume config after a crash, from the checkpoints on disk.
 
-Repeated crash-resume (HPU's A4000 thrashes fp32 and dies every ~20 rounds) only needs two
+Repeated crash-resume (RSNA-AU's A4000 thrashes fp32 and dies every ~20 rounds) only needs two
 values set correctly each time, and getting them wrong is the one real failure mode. This scans
 the run's results dir and prints them, so each resume is copy-paste rather than guesswork.
 
@@ -13,7 +13,7 @@ personal pass and the `{site}_gmic_model_round_N.pth` save. So the server aggreg
 `global_trajectory/{site}_global_round_N.pth` (the Ditto reseed source) and its
 `{site}_gmic_model_round_N.pth` (the personal model v restore source). Thus any round for which
 the personal ckpt exists is fully resumable across all sites. We take the MIN across sites of
-each site's highest such round: if HPU crashed mid-round N+1 while others finished it, HPU's max
+each site's highest such round: if RSNA-AU crashed mid-round N+1 while others finished it, RSNA-AU's max
 is N (the safe common round), and the other sites' stale round-(N+1) files are simply redone.
 
 USAGE

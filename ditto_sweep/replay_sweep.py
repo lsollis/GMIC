@@ -33,14 +33,14 @@ CPU clone. Sanity check after launch: each site's round-0 val AUC should ~= its 
 
 Example
 -------
-  # scalar lambda sweep, replaying UHCC's cached global trajectory
+  # scalar lambda sweep, replaying HIPIMR's cached global trajectory
   python replay_sweep.py --base-job ../gmic_job \
-    --traj-dir /workspace/sim/fedavg/UHCC/incoming_global --traj-prefix UHCC \
-    --lambdas 0.05,0.1,0.5 --clients UHCC,HPU,RSNA-GCP --gpu 0 \
+    --traj-dir /workspace/sim/fedavg/HIPIMR/incoming_global --traj-prefix HIPIMR \
+    --lambdas 0.05,0.1,0.5 --clients HIPIMR,RSNA-AU,RSNA-US --gpu 0 \
     --out /workspace/sim/ditto_replay/sweep_summary.json
 
   # module-wise, anchored at 0.1, global tethered upward / heads freer
-  python replay_sweep.py --base-job ../gmic_job --traj-dir ... --traj-prefix UHCC --modulewise \
+  python replay_sweep.py --base-job ../gmic_job --traj-dir ... --traj-prefix HIPIMR --modulewise \
     --anchor 0.1 --global-values 0.1,0.5,1.0 --local-values 0.01,0.05,0.1 --fusion-values 0.01,0.05,0.1
 """
 from __future__ import annotations
@@ -57,7 +57,7 @@ import tempfile
 import torch
 
 # Portable scratch dir for the executor's (unused-by-replay) output/log paths -- /tmp does not exist
-# on Windows (the HPU node), so derive from the OS temp dir.
+# on Windows (the RSNA-AU node), so derive from the OS temp dir.
 _SCRATCH = os.path.join(tempfile.gettempdir(), "ditto_replay_scratch")
 
 # Estimators/components live in the base job's app/custom; add it to the path.
@@ -229,7 +229,7 @@ def main():
     ap.add_argument("--base-job", help="job dir providing app/config + app/custom (required unless --combine)")
     ap.add_argument("--traj-dir", help="dir with {prefix}_incoming_global_round_*.pth (required unless --combine)")
     ap.add_argument("--traj-prefix", help="site prefix of the cached global trajectory (required unless --combine)")
-    ap.add_argument("--clients", default="UHCC,HPU,RSNA-GCP")
+    ap.add_argument("--clients", default="HIPIMR,RSNA-AU,RSNA-US")
     ap.add_argument("--gpu", default="0")
     ap.add_argument("--rounds", type=int, default=0, help="replay rounds (0 = all cached rounds)")
     ap.add_argument("--lambdas", default="0.05,0.1,0.5")

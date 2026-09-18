@@ -8,7 +8,7 @@ freeze 2, balanced sampler, pos_weight 1.0).
 ## What it does
 For each λ it renders a job from `--base-job` (config **and** custom code) with only
 `ditto_lambda`, `num_rounds`, and the output/tb/log paths overridden, runs `nvflare
-simulator` with 3 clients (UHCC/HPU/RSNA-GCP) each on its own GPU, then reads each client's
+simulator` with 3 clients (HIPIMR/RSNA-AU/RSNA-US) each on its own GPU, then reads each client's
 best **val** AUC and ranks λ by worst-site.
 
 - **Single config source**: `gmic_job/app/config` + `gmic_job/meta.json` (no duplicate
@@ -29,7 +29,7 @@ best **val** AUC and ranks λ by worst-site.
 ## Prerequisites on the DGX
 1. **All three sites' data present locally**, at the paths in
    `gmic_job/app/config/config_fed_client.json` → `data_path_map` (CSVs) and the full image
-   paths *inside* those CSVs (`file_path` column). The DGX must hold UHCC + HPU + RSNA images.
+   paths *inside* those CSVs (`file_path` column). The DGX must hold HIPIMR + RSNA-AU + RSNA images.
 2. `sample_model_5.p` at `/workspace/models/sample_model_5.p` (fail-loud if missing).
 3. `nvflare` on PATH; GPUs 1–6 free (GPU 0 is the live FL run).
 4. Edit `gmic_job/app/config/config_fed_client.json` if your CSV paths or cache locations
@@ -80,7 +80,7 @@ ranking are identical in form to the λ sweep (`sweep_summary.json`, per-site
 - Per-site results: `<output-base>/l<λ>/<site>/<site>_best_val_overall_gmic_metrics.json`.
 - Final ranked table is printed and saved to `<work-root>/sweep_summary.json`:
   ```
-   lambda  worst_site   mean_site         UHCC         HPU    RSNA-GCP
+   lambda  worst_site   mean_site         HIPIMR         RSNA-AU    RSNA-US
       0.1      0.8420      0.8710       0.8830      0.8420      0.8880  <- BEST
       ...
   BEST (worst_site): lambda=0.1  worst_site=0.8420

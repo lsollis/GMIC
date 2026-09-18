@@ -2,7 +2,7 @@
 
 Computes the **POOLED** breast-level AUC (DeLong CI) + Youden(val)→test sens/spec (Wilson CI) across
 all sites for the salvage `incoming_global` predictions, and logs it to the **server** log — so you can
-read it through the admin console even for a node whose files you can't reach (e.g. HPU).
+read it through the admin console even for a node whose files you can't reach (e.g. RSNA-AU).
 
 It's a one-round, no-GPU job: each client reads the prediction CSVs the salvage already wrote to its
 `results_dir`, breast-aggregates, and ships the de-identified `(prob, label)` arrays; the server
@@ -36,11 +36,11 @@ A re-submit **appends** to the existing `out_file` instead of recomputing from s
   they ship only those — no client redeploy needed. Omit `rounds` to do all rounds (merge still
   makes that idempotent — already-done rounds are just recomputed to the same value).
 - The 7200s `timeout` (matching the 2h `heart_beat_timeout`/`retry_timeout`) means a single exchange
-  waits up to 2h for HPU to reconnect and finish, so most blips never even need a re-submit.
+  waits up to 2h for RSNA-AU to reconnect and finish, so most blips never even need a re-submit.
 
 > Note: NVFlare's broadcast is one atomic exchange — the server pools after all sites' payloads
 > arrive. So within a single submit, the per-round write protects against a server-side crash during
-> pooling; a HPU disconnect *during the exchange* is covered by the 2h reconnect window and, failing
+> pooling; a RSNA-AU disconnect *during the exchange* is covered by the 2h reconnect window and, failing
 > that, by re-submit + merge. The job is seconds of compute, so a fresh exchange is cheap.
 
 ## Read the result
@@ -68,8 +68,8 @@ test breasts (≈ 878 + 396 + 396 = 1670 for test, ~826 for val).
 
 - `deployed_local` is deliberately excluded (a different model per site → not poolable).
 - The pooled math is identical to `tools/salvage_stats.py`; verified equal on synthetic 3-site data.
-- Needs all three sites online for the one round (seconds, no GPU — minimal HPU exposure).
-- Resilient to HPU network blips: the controller's `timeout` is 7200s (2h), matching the
+- Needs all three sites online for the one round (seconds, no GPU — minimal RSNA-AU exposure).
+- Resilient to RSNA-AU network blips: the controller's `timeout` is 7200s (2h), matching the
   `heart_beat_timeout`/`retry_timeout` raised in `master_template.yml`. A site that drops and
   reconnects within 2h rejoins the still-running round instead of aborting the job. (The 900s default
   used to cut that off at 15 min.) Requires the re-provisioned/hot-edited 2h resources to be deployed.

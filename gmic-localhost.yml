@@ -8,26 +8,26 @@ description: |
 participants:
   - name: overseer.example.com
     type: overseer
-    org: UHCC
+    org: HIPIMR
     protocol: https
     host: localhost
     api_root: /api/v1
     port: 8443
   - name: localhost
     type: server
-    org: UHCC
+    org: HIPIMR
     host: localhost
     fed_learn_port: 8102
     admin_port: 8103
-  - name: UHCC
+  - name: HIPIMR
     type: client
-    org: UHCC
+    org: HIPIMR
   - name: Moffitt
     type: client
     org: Moffitt
   - name: admin@example.org
     type: admin
-    org: UHCC
+    org: HIPIMR
     role: project_admin
 
 # The same methods in all builders are called in their order defined in builders section

@@ -11,12 +11,12 @@
 import os
 
 # NOTE: we intentionally do NOT force PYTORCH_CUDA_ALLOC_CONF=expandable_segments here.
-# It was tried as a fragmentation fix, but "device not ready" driver faults on HPU's A4000
+# It was tried as a fragmentation fix, but "device not ready" driver faults on RSNA-AU's A4000
 # (driver 595.97) correlated exactly with expandable_segments being ON -- the only config that
 # ever ran clean on that card (the original mw run, to round 20) had it OFF. expandable_segments
 # uses the driver's virtual-memory API and is flaky on some GPU/driver combos; leave it off.
-# With per-site precision, no site needs it: HPU runs fp32 (fits its 16 GiB natively) and
-# RSNA/UHCC run fp16 (ample headroom). A container env var can still opt in if ever needed.
+# With per-site precision, no site needs it: RSNA-AU runs fp32 (fits its 16 GiB natively) and
+# RSNA/HIPIMR run fp16 (ample headroom). A container env var can still opt in if ever needed.
 import csv
 import copy
 import json
@@ -189,7 +189,7 @@ class GMICFederatedExecutor(Executor):
             # ---------------------------------------------------------------------------------
             # CONSTRAINED-GPU / DIAGNOSTIC TOGGLES (all optional; every default below reproduces
             # stock behavior). These were added to train a site on a 16 GiB RTX A4000 (client
-            # "HPU") without moving it to an A100. Leave them at their defaults on capable GPUs;
+            # "RSNA-AU") without moving it to an A100. Leave them at their defaults on capable GPUs;
             # a site sets them via its config only when it needs them. See README "Training on a
             # memory-constrained GPU" for the recipe.
             # ---------------------------------------------------------------------------------
@@ -214,28 +214,28 @@ class GMICFederatedExecutor(Executor):
             # Multi-GPU & memory optimization
             use_amp: bool = False,
             # Ditto personal-pass precision, independent of use_amp. None => follow use_amp.
-            # False => force fp32 personal pass (the recipe that ran 20+ rounds on HPU's A4000)
+            # False => force fp32 personal pass (the recipe that ran 20+ rounds on RSNA-AU's A4000)
             # while the main pass keeps AMP.
             personal_amp: bool | None = None,
-            # PER-SITE override map, e.g. {"HPU": false}. A site listed here uses that precision for
+            # PER-SITE override map, e.g. {"RSNA-AU": false}. A site listed here uses that precision for
             # its personal pass; sites not listed fall back to personal_amp/use_amp. Resolved from
-            # the FL identity at runtime, so ONE config deployed to all sites gives HPU fp32 (its
-            # A4000 faults on the fp16 backward) while RSNA/UHCC keep AMP -- no per-site app copies,
-            # and no need to move a site to an A100. The sites genuinely conflict: HPU's fp32
+            # the FL identity at runtime, so ONE config deployed to all sites gives RSNA-AU fp32 (its
+            # A4000 faults on the fp16 backward) while RSNA/HIPIMR keep AMP -- no per-site app copies,
+            # and no need to move a site to an A100. The sites genuinely conflict: RSNA-AU's fp32
             # footprint fits its 16 GiB card but fp16 faults there; RSNA's fp32 footprint OOMs a
             # small card so it needs AMP -- one global precision cannot satisfy both.
             personal_amp_by_site: dict | None = None,
-            # PER-SITE personal-pass micro-batch size, e.g. {"HPU": 8}. The personal pass processes
+            # PER-SITE personal-pass micro-batch size, e.g. {"RSNA-AU": 8}. The personal pass processes
             # each loader batch in chunks of this size, accumulating gradients to the full effective
-            # batch, so a card too small for the full fp32 batch (HPU's 16 GiB A4000, which
+            # batch, so a card too small for the full fp32 batch (RSNA-AU's 16 GiB A4000, which
             # oversubscribes to host RAM and DEADLOCKS on the full batch) stays under its memory
             # ceiling. Only BatchNorm stats change (computed on the smaller chunk); the optimizer
             # still sees the full effective batch. Unlisted sites use batch_size (no chunking).
             personal_batch_size_by_site: dict | None = None,
-            # PER-SITE MAIN-pass micro-batch, e.g. {"HPU": 8}. Same idea as the personal map, for the
+            # PER-SITE MAIN-pass micro-batch, e.g. {"RSNA-AU": 8}. Same idea as the personal map, for the
             # shared-w training pass. Needed once the backbone UNFREEZES (round freeze_backbone_epochs):
             # autograd then retains all backbone activations for backward, so the full fp16 batch
-            # overflows HPU's 16 GiB A4000 and deadlocks. Chunks accumulate to the full effective
+            # overflows RSNA-AU's 16 GiB A4000 and deadlocks. Chunks accumulate to the full effective
             # batch (only BN sees the chunk); unlisted sites use batch_size (no chunking).
             train_batch_size_by_site: dict | None = None,
             grad_accumulation: int = 1,
@@ -352,7 +352,7 @@ class GMICFederatedExecutor(Executor):
             # Personal-pass precision, DECOUPLED from the main pass. The GLOBAL default (None =>
             # follow use_amp) plus a per-site override map. The effective value for THIS site is
             # resolved lazily once the FL identity is known (_resolve_personal_amp), so a single
-            # config can run HPU fp32 while RSNA/UHCC run AMP. _personal_amp holds the provisional
+            # config can run RSNA-AU fp32 while RSNA/HIPIMR run AMP. _personal_amp holds the provisional
             # default until then.
             self._personal_amp_default = self.use_amp if personal_amp is None else bool(personal_amp)
             self._personal_amp_by_site = dict(personal_amp_by_site or {})
@@ -480,7 +480,7 @@ class GMICFederatedExecutor(Executor):
     def handle_event(self, event_type: str, fl_ctx: FLContext):
         """Handle NVFLARE events"""
         if event_type == EventType.START_RUN:
-            # Capture this client's FL identity (UHCC/HPU/RSNA-GCP) BEFORE initialize(),
+            # Capture this client's FL identity (HIPIMR/RSNA-AU/RSNA-US) BEFORE initialize(),
             # which has no fl_ctx, so initialize() can resolve a per-client data_path_map.
             try:
                 self._identity = fl_ctx.get_identity_name()
@@ -533,7 +533,7 @@ class GMICFederatedExecutor(Executor):
             )
 
         # 0. Per-client data path: if a data_path_map is given, each client picks its OWN
-        # CSV by FL identity (UHCC/HPU/RSNA-GCP), so all sites keep distinct filenames from
+        # CSV by FL identity (HIPIMR/RSNA-AU/RSNA-US), so all sites keep distinct filenames from
         # ONE distributed config. No per-client fallback: a map present but missing this
         # identity is a config error (raise) rather than silently loading the wrong CSV.
         # When no map is given at all, self.data_path is used (single-site / centralized jobs).
@@ -1205,7 +1205,7 @@ class GMICFederatedExecutor(Executor):
         # Ship each site's de-identified breast-level (prob,label) to the server so it can log BOTH
         # the per-site rows AND the pooled row to the PERSISTENT server log (/workspace/server_logs),
         # which survives the job-workspace deletion -- and reaches sites whose own logs/files are not
-        # accessible (e.g. HPU). Scores+labels only: no images, no IDs.
+        # accessible (e.g. RSNA-AU). Scores+labels only: no images, no IDs.
         def _record(method_tag, src_round, breasts):
             return {"site": client, "method": method_tag, "src_round": int(src_round),
                     "splits": {s: {"p": [float(x) for x in breasts[s][0]],
@@ -1861,7 +1861,7 @@ class GMICFederatedExecutor(Executor):
         reports exactly which card + driver + cuDNN it is running -- the info needed to decide
         whether an fp16 backward kernel that deadlocks is a known GPU/driver issue. total VRAM in
         particular settles the card model (an fp16 personal-pass hang was observed with ~18.9 GiB
-        RESERVED, which is impossible on a 16 GiB card, so HPU is NOT the assumed 16 GiB A4000).
+        RESERVED, which is impossible on a 16 GiB card, so RSNA-AU is NOT the assumed 16 GiB A4000).
         """
         alloc_conf = os.environ.get("PYTORCH_CUDA_ALLOC_CONF", "<unset>")
         self._logger.info("[gpu-diag] PYTORCH_CUDA_ALLOC_CONF=%s", alloc_conf)
@@ -1946,8 +1946,8 @@ class GMICFederatedExecutor(Executor):
     def _resolve_personal_amp(self, fl_ctx: FLContext):
         """Fix the personal-pass precision for THIS site, once, from the per-site override map.
 
-        Single config deployed to every site: the map (e.g. {"HPU": false}) lets HPU run its
-        personal pass in fp32 -- its A4000 faults on the fp16 backward -- while RSNA/UHCC keep AMP,
+        Single config deployed to every site: the map (e.g. {"RSNA-AU": false}) lets RSNA-AU run its
+        personal pass in fp32 -- its A4000 faults on the fp16 backward -- while RSNA/HIPIMR keep AMP,
         with no per-site app duplication and no forced A100 move. Rebuilds the v scaler to match the
         resolved precision. Idempotent: resolves + logs exactly once.
         """
@@ -1986,7 +1986,7 @@ class GMICFederatedExecutor(Executor):
             self.log_warning(fl_ctx, "[ditto] personal model/ref not ready; skipping personal pass")
             return
         lam = self.ditto_lambda if self.method == "ditto" else self.lam_dict
-        self._resolve_personal_amp(fl_ctx)  # per-site precision, once (fp32 for HPU, AMP elsewhere)
+        self._resolve_personal_amp(fl_ctx)  # per-site precision, once (fp32 for RSNA-AU, AMP elsewhere)
         personal_amp = self._personal_amp
         scaler = getattr(self, "_v_scaler", None) if personal_amp else None
         self.log_info(fl_ctx, f"[ditto] personal pass: epochs={self.epochs} lambda={lam} "

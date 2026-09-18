@@ -2,7 +2,7 @@
 """Ditto lambda sweep via the NVFLARE simulator on one multi-GPU host (e.g. the DGX).
 
 For each ditto_lambda it renders a job from a base job (custom code) + the ditto config
-templates, runs `nvflare simulator` with 3 simulated clients (UHCC/HPU/RSNA-GCP) each
+templates, runs `nvflare simulator` with 3 simulated clients (HIPIMR/RSNA-AU/RSNA-US) each
 pinned to its own GPU, collects each client's best PERSONAL-model val AUC, and reports the
 lambda that maximizes the WORST-site AUC (the equity-thesis selection metric). All three
 aggregates (worst_site / mean_site / pooled-as-mean) are logged.
@@ -245,7 +245,7 @@ def build_runs(a):
     if a.fedavg:
         # One FedAvg run that caches the per-round global trajectory (the anchor for Ditto replay).
         # Same simulator/data/seed as the ditto sweeps, so replay reproduces the interleaved baseline;
-        # and being simulator-only it never touches HPU (no nightly crashes / resume needed).
+        # and being simulator-only it never touches RSNA-AU (no nightly crashes / resume needed).
         return [{"label": "fedavg", "display": "fedavg",
                  "overrides": {"method": "fedavg", "cache_incoming_global": True,
                                "cache_global_trajectory": True}}]
@@ -447,7 +447,7 @@ def main():
                          "per-site like the sweeps")
     ap.add_argument("--fedavg", action="store_true",
                     help="run ONE FedAvg job that caches the per-round global trajectory (the anchor "
-                         "for Ditto replay via replay_sweep.py); no sweep, no HPU")
+                         "for Ditto replay via replay_sweep.py); no sweep, no RSNA-AU")
     ap.add_argument("--modulewise", action="store_true",
                     help="sweep method=ditto_modulewise per-group lambdas (one-at-a-time, anchored)")
     ap.add_argument("--anchor", type=float, default=0.1,
@@ -458,7 +458,7 @@ def main():
     ap.add_argument("--rounds", type=int, default=20)
     ap.add_argument("--gpu-pools", default="1,2,3;4,5,6",
                     help="';'-separated GPU triples; one concurrent run per pool")
-    ap.add_argument("--clients", default="UHCC,HPU,RSNA-GCP")
+    ap.add_argument("--clients", default="HIPIMR,RSNA-AU,RSNA-US")
     ap.add_argument("--threads", type=int, default=3, help="simulator -t (clients run concurrently)")
     ap.add_argument("--output-base", default="/workspace/sim/ditto",
                     help="output_dir base; executor appends /<run-label>/<site>")

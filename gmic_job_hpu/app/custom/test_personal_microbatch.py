@@ -1,7 +1,7 @@
 # ============================================================================
 # test_personal_microbatch.py - micro-chunked Ditto personal pass
 # ----------------------------------------------------------------------------
-# HPU's 16 GiB A4000 deadlocks on the full fp32 personal batch (it needs ~17-22 GiB, oversubscribes
+# RSNA-AU's 16 GiB A4000 deadlocks on the full fp32 personal batch (it needs ~17-22 GiB, oversubscribes
 # to host RAM). personal_batch_size_by_site splits each loader batch into micro-chunks that fit,
 # accumulating gradients so the optimizer step equals a single full-batch step -- only BatchNorm
 # sees the smaller chunk. The correctness claim is exactly that gradient-equality, pinned here.
@@ -142,21 +142,21 @@ def test_main_chunked_grad_equals_full_batch_grad():
 
 
 def test_train_batch_size_by_site_resolves():
-    """The main-pass per-site map picks HPU's micro-batch; unlisted sites use the full loader batch."""
+    """The main-pass per-site map picks RSNA-AU's micro-batch; unlisted sites use the full loader batch."""
     with tempfile.TemporaryDirectory() as td:
-        ex = make_executor("ditto_modulewise", td, train_batch_size_by_site={"HPU": 8})
-        assert ex._train_batch_size_by_site.get("HPU") == 8
-        assert ex._train_batch_size_by_site.get("RSNA-GCP", ex.batch_size) == ex.batch_size
-    print("[microbatch] main-pass per-site map resolves (HPU->8, others->batch_size). OK")
+        ex = make_executor("ditto_modulewise", td, train_batch_size_by_site={"RSNA-AU": 8})
+        assert ex._train_batch_size_by_site.get("RSNA-AU") == 8
+        assert ex._train_batch_size_by_site.get("RSNA-US", ex.batch_size) == ex.batch_size
+    print("[microbatch] main-pass per-site map resolves (RSNA-AU->8, others->batch_size). OK")
 
 
 def test_personal_batch_size_by_site_resolves():
-    """The per-site map picks HPU's micro-batch; unlisted sites use the full loader batch."""
+    """The per-site map picks RSNA-AU's micro-batch; unlisted sites use the full loader batch."""
     with tempfile.TemporaryDirectory() as td:
-        ex = make_executor("ditto_modulewise", td, personal_batch_size_by_site={"HPU": 8})
-        assert ex._personal_batch_size_by_site.get("HPU") == 8
-        assert ex._personal_batch_size_by_site.get("RSNA-GCP", ex.batch_size) == ex.batch_size
-    print("[microbatch] per-site micro-batch map resolves (HPU->8, others->batch_size). OK")
+        ex = make_executor("ditto_modulewise", td, personal_batch_size_by_site={"RSNA-AU": 8})
+        assert ex._personal_batch_size_by_site.get("RSNA-AU") == 8
+        assert ex._personal_batch_size_by_site.get("RSNA-US", ex.batch_size) == ex.batch_size
+    print("[microbatch] per-site micro-batch map resolves (RSNA-AU->8, others->batch_size). OK")
 
 
 def test_default_is_unchunked():

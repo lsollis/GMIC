@@ -119,7 +119,7 @@ Upstream GMIC does NOT — it saves the **raw variable-size crop** and the augme
   aspect ratio exact (verified across thousands of aspect ratios — never clips).
 - **The one real artifact: per-site scale variability.** Padding fraction varies with source aspect
   ratio (~10–39%), so the breast sits at different scales in the frame, and that variation is
-  **site-correlated** (RSNA vs UHCC differ). This aliases onto the spatial-scale λ-probe / saliency
+  **site-correlated** (RSNA vs HIPIMR differ). This aliases onto the spatial-scale λ-probe / saliency
   comparison — the paper's second contribution. Stage 1 now logs `[PAD] sid=… pad_frac=…` per image;
   aggregate the per-site distribution from a run (`grep '\[PAD\]'`).
 - **OPEN DECISION (defer to the padding numbers):** if per-site padding is small/overlapping → keep

@@ -19,18 +19,18 @@ the `path` column, whose basename is the loader's image_id:
 We rebuild that exact key from the metadata's own columns and match on it -- identical
 construction on both sides, so matching is exact. Breasts are aggregated by the metadata's
 (patient_id, exam_id, laterality), and race is read from that same joined row. Site is not
-filtered: race/ethnicity exists only for UHCC, and --meta is the UHCC-only registry CSV.
+filtered: race/ethnicity exists only for HIPIMR, and --meta is the HIPIMR-only registry CSV.
 
 Prediction CSV columns: site_id,round,method,split,exam_id,view,path,prob_malignant,label
   (only `path`, `prob_malignant`, `label` are used; exam_id/view/site_id are ignored.)
-Metadata CSV (gmic_df_UHCC_*.csv): patient_id, exam_id, laterality, view, file_path,
+Metadata CSV (gmic_df_HIPIMR_*.csv): patient_id, exam_id, laterality, view, file_path,
   image_filename, ..., ETH, ETH_DESCR, ...
 
 Usage:
   python subgroup_fairness.py \
-      --pred  UHCC_predictions_ditto_perround_round49_test.csv \
-      --meta  gmic_df_UHCC_full_20260604_113112.csv \
-      --val   UHCC_predictions_ditto_perround_round49_val.csv   # sets the Youden operating point
+      --pred  HIPIMR_predictions_ditto_perround_round49_test.csv \
+      --meta  gmic_df_HIPIMR_full_20260604_113112.csv \
+      --val   HIPIMR_predictions_ditto_perround_round49_val.csv   # sets the Youden operating point
 
 Run once per deployed model (Ditto r49, then pretrained r0) to show whether personalization
 narrows any per-group sensitivity gap. Works in a notebook too:
@@ -108,7 +108,7 @@ def load(path):
         return list(csv.DictReader(f))
 
 def load_meta(meta_csv, eth_col="ETH_DESCR", eth_code_col="ETH"):
-    """Index the UHCC registry by image_id, reconstructed identically to the data loader:
+    """Index the HIPIMR registry by image_id, reconstructed identically to the data loader:
     f'{patient_id}_{exam_id}_{laterality}_{view}'. Also indexes by image_filename stem and
     file_path stem as fallbacks, so we match whichever form the prediction `path` took."""
     by_img = {}
@@ -198,7 +198,7 @@ def youden(y, s):
 
 # ---------------- main ----------------
 def run(pred_csv, meta_csv, threshold=None, val_csv=None, out_csv=None,
-        site="UHCC", eth_col="ETH_DESCR", eth_code_col="ETH", eth_map=None):
+        site="HIPIMR", eth_col="ETH_DESCR", eth_code_col="ETH", eth_map=None):
     eth_map = DEFAULT_ETH_MAP if eth_map is None else eth_map
     blank_label = eth_map.get("_blank", "Unknown")
     preds = load(pred_csv)
@@ -213,7 +213,7 @@ def run(pred_csv, meta_csv, threshold=None, val_csv=None, out_csv=None,
         msg = f"[match] {len(unmatched)}/{len(preds)} prediction rows had NO metadata match. examples: {ex}"
         if STRICT_MATCH:
             sys.exit(msg + "\n  Refusing to proceed: an unmatched row would silently drop a breast "
-                            "from the fairness table. Check that --meta is the UHCC registry whose "
+                            "from the fairness table. Check that --meta is the HIPIMR registry whose "
                             "patient_id/exam_id/laterality/view built these image filenames.")
         print("[warn] " + msg)
     print(f"[breasts] {len(keys)} breasts aggregated (patient_id, exam_id, laterality); "
@@ -302,11 +302,11 @@ def run(pred_csv, meta_csv, threshold=None, val_csv=None, out_csv=None,
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--pred", required=True, help="Site A test prediction CSV (deployed model)")
-    ap.add_argument("--meta", required=True, help="UHCC registry CSV with patient_id/exam_id/laterality/view + ETH_DESCR")
+    ap.add_argument("--meta", required=True, help="HIPIMR registry CSV with patient_id/exam_id/laterality/view + ETH_DESCR")
     ap.add_argument("--val", default=None, help="optional Site A validation prediction CSV (Youden operating point)")
     ap.add_argument("--threshold", type=float, default=None, help="fixed operating threshold (overrides --val)")
     ap.add_argument("--out", default=None, help="output CSV path (default: <pred_stem>_subgroups.csv in cwd)")
-    ap.add_argument("--site", default="UHCC", help="site label for the output header")
+    ap.add_argument("--site", default="HIPIMR", help="site label for the output header")
     ap.add_argument("--eth-col", default="ETH_DESCR", help="registry column holding the race/ethnicity description")
     ap.add_argument("--eth-code-col", default="ETH", help="registry column holding the race/ethnicity code")
     ap.add_argument("--eth-map", default=None,

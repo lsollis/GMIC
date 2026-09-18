@@ -34,7 +34,7 @@ the offline path is proven to reproduce the in-run per-site numbers exactly.
 
 `config_fed_client.json` (executor args):
 - `"salvage_eval_rounds": [6, 8, 10, 14, 23, 26]` — shortlist = pooled candidates {6,8,10} ∪ per-site
-  bests {14 HPU, 23 UHCC, 26 last}. Empty/absent ⇒ normal training (salvage off).
+  bests {14 RSNA-AU, 23 HIPIMR, 26 last}. Empty/absent ⇒ normal training (salvage off).
 - `"salvage_ckpt_dir": "/workspace/data/processed/fedprox_3client_fixedinit_20260609"` — the
   interrupted run's dir (holds `global_trajectory/{site}_global_round_{N}.pth`, the authoritative
   SENT weights; falls back to `{site}_gmic_model_round_{N}.pth`). Defaults to `results_dir` if unset.
@@ -43,7 +43,7 @@ the offline path is proven to reproduce the in-run per-site numbers exactly.
 - `"num_rounds": 7` — `len(salvage_eval_rounds) + 1` (the trailing round evaluates the last
   reconstruction). **Revert to your training value (e.g. 40+) for a normal run.**
 
-No training happens; each round only loads weights and runs eval, so the HPU-dropout window is
+No training happens; each round only loads weights and runs eval, so the RSNA-AU-dropout window is
 seconds. Weighting is the freshly-preprocessed `train_size` (matches the original aggregation at
 epochs=1) — computed automatically per site, nothing to supply.
 
@@ -61,7 +61,7 @@ python tools/salvage_stats.py --pred-dir <gathered_csvs> --out-prefix results/fe
 ```
 
 **Built-in pipeline check (free):** `deployed_local` val AUC at round N reproduces the original logged
-`deployed_val_auc[N]` (epochs=1: sent == best-val deployed). E.g. UHCC `deployed_local` src_round=23
+`deployed_val_auc[N]` (epochs=1: sent == best-val deployed). E.g. HIPIMR `deployed_local` src_round=23
 val AUC ≈ 0.8924. If it matches, splits/loading/eval are faithful end-to-end.
 
 ## Offline stats (pooled + combined table)
