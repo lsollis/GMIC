@@ -180,11 +180,18 @@ class GMICFederatedExecutor(Executor):
             load_checkpoint: str = "",
             # Logging / TensorBoard
             train_log_batch_interval: int = 5,
+            # ---------------------------------------------------------------------------------
+            # CONSTRAINED-GPU / DIAGNOSTIC TOGGLES (all optional; every default below reproduces
+            # stock behavior). These were added to train a site on a 16 GiB RTX A4000 (client
+            # "HPU") without moving it to an A100. Leave them at their defaults on capable GPUs;
+            # a site sets them via its config only when it needs them. See README "Training on a
+            # memory-constrained GPU" for the recipe.
+            # ---------------------------------------------------------------------------------
             # Background heartbeat (seconds) for long phases: a watchdog THREAD logs where the
             # round is stuck even while the main thread is blocked inside a CUDA kernel or a
             # stalled read -- which is exactly when per-batch logging goes silent. Logs only;
-            # never aborts, so a slow-but-healthy site is never killed. 0/None disables.
-            heartbeat_interval_s: int = 300,
+            # never aborts, so a slow-but-healthy site is never killed. 0/None disables (default).
+            heartbeat_interval_s: int = 0,
             # Diagnostic: torch.cuda.synchronize() after each stage of the Ditto personal step.
             # CUDA launches are async, so without this the heartbeat's `stage` names the first
             # SYNC POINT the CPU reaches, not the op that actually wedged -- e.g. a stuck backward

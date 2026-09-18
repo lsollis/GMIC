@@ -3,11 +3,22 @@
 # ============================================================================
 
 import os
+
+# NOTE: we intentionally do NOT force PYTORCH_CUDA_ALLOC_CONF=expandable_segments here.
+# It was tried as a fragmentation fix, but "device not ready" driver faults on HPU's A4000
+# (driver 595.97) correlated exactly with expandable_segments being ON -- the only config that
+# ever ran clean on that card (the original mw run, to round 20) had it OFF. expandable_segments
+# uses the driver's virtual-memory API and is flaky on some GPU/driver combos; leave it off.
+# With per-site precision, no site needs it: HPU runs fp32 (fits its 16 GiB natively) and
+# RSNA/UHCC run fp16 (ample headroom). A container env var can still opt in if ever needed.
 import csv
 import copy
 import json
 import math
+import time
 import logging
+import threading
+import contextlib
 
 import torch
 import torch.nn as nn
@@ -169,6 +180,24 @@ class GMICFederatedExecutor(Executor):
             load_checkpoint: str = "",
             # Logging / TensorBoard
             train_log_batch_interval: int = 5,
+            # ---------------------------------------------------------------------------------
+            # CONSTRAINED-GPU / DIAGNOSTIC TOGGLES (all optional; every default below reproduces
+            # stock behavior). These were added to train a site on a 16 GiB RTX A4000 (client
+            # "HPU") without moving it to an A100. Leave them at their defaults on capable GPUs;
+            # a site sets them via its config only when it needs them. See README "Training on a
+            # memory-constrained GPU" for the recipe.
+            # ---------------------------------------------------------------------------------
+            # Background heartbeat (seconds) for long phases: a watchdog THREAD logs where the
+            # round is stuck even while the main thread is blocked inside a CUDA kernel or a
+            # stalled read -- which is exactly when per-batch logging goes silent. Logs only;
+            # never aborts, so a slow-but-healthy site is never killed. 0/None disables (default).
+            heartbeat_interval_s: int = 0,
+            # Diagnostic: torch.cuda.synchronize() after each stage of the Ditto personal step.
+            # CUDA launches are async, so without this the heartbeat's `stage` names the first
+            # SYNC POINT the CPU reaches, not the op that actually wedged -- e.g. a stuck backward
+            # surfaces as stage=step because scaler.step is the first thing that waits. Costs the
+            # CPU/GPU overlap (negligible here: the pass is compute-bound) and is off by default.
+            stage_sync: bool = False,
             log_lr_each_epoch: bool = False,
             tb_log_dir: str | None = None,
             disable_tensorboard: bool = False,
@@ -178,6 +207,31 @@ class GMICFederatedExecutor(Executor):
             debug_devices: bool = False,
             # Multi-GPU & memory optimization
             use_amp: bool = False,
+            # Ditto personal-pass precision, independent of use_amp. None => follow use_amp.
+            # False => force fp32 personal pass (the recipe that ran 20+ rounds on HPU's A4000)
+            # while the main pass keeps AMP.
+            personal_amp: bool | None = None,
+            # PER-SITE override map, e.g. {"HPU": false}. A site listed here uses that precision for
+            # its personal pass; sites not listed fall back to personal_amp/use_amp. Resolved from
+            # the FL identity at runtime, so ONE config deployed to all sites gives HPU fp32 (its
+            # A4000 faults on the fp16 backward) while RSNA/UHCC keep AMP -- no per-site app copies,
+            # and no need to move a site to an A100. The sites genuinely conflict: HPU's fp32
+            # footprint fits its 16 GiB card but fp16 faults there; RSNA's fp32 footprint OOMs a
+            # small card so it needs AMP -- one global precision cannot satisfy both.
+            personal_amp_by_site: dict | None = None,
+            # PER-SITE personal-pass micro-batch size, e.g. {"HPU": 8}. The personal pass processes
+            # each loader batch in chunks of this size, accumulating gradients to the full effective
+            # batch, so a card too small for the full fp32 batch (HPU's 16 GiB A4000, which
+            # oversubscribes to host RAM and DEADLOCKS on the full batch) stays under its memory
+            # ceiling. Only BatchNorm stats change (computed on the smaller chunk); the optimizer
+            # still sees the full effective batch. Unlisted sites use batch_size (no chunking).
+            personal_batch_size_by_site: dict | None = None,
+            # PER-SITE MAIN-pass micro-batch, e.g. {"HPU": 8}. Same idea as the personal map, for the
+            # shared-w training pass. Needed once the backbone UNFREEZES (round freeze_backbone_epochs):
+            # autograd then retains all backbone activations for backward, so the full fp16 batch
+            # overflows HPU's 16 GiB A4000 and deadlocks. Chunks accumulate to the full effective
+            # batch (only BN sees the chunk); unlisted sites use batch_size (no chunking).
+            train_batch_size_by_site: dict | None = None,
             grad_accumulation: int = 1,
             memory_efficient: bool = False,
             pre_train_task_name: str = AppConstants.TASK_GET_WEIGHTS,
@@ -279,6 +333,8 @@ class GMICFederatedExecutor(Executor):
             self.pretrained_model_index = pretrained_model_index
             self.load_checkpoint = load_checkpoint
             self.train_log_batch_interval = train_log_batch_interval
+            self.heartbeat_interval_s = int(heartbeat_interval_s or 0)
+            self.stage_sync = bool(stage_sync)
             self.log_lr_each_epoch = log_lr_each_epoch
             self.tb_log_dir = tb_log_dir
             self.disable_tensorboard = disable_tensorboard
@@ -287,9 +343,27 @@ class GMICFederatedExecutor(Executor):
             self.gpus = gpus
             self.debug_devices = debug_devices
             self.use_amp = use_amp
+            # Personal-pass precision, DECOUPLED from the main pass. The GLOBAL default (None =>
+            # follow use_amp) plus a per-site override map. The effective value for THIS site is
+            # resolved lazily once the FL identity is known (_resolve_personal_amp), so a single
+            # config can run HPU fp32 while RSNA/UHCC run AMP. _personal_amp holds the provisional
+            # default until then.
+            self._personal_amp_default = self.use_amp if personal_amp is None else bool(personal_amp)
+            self._personal_amp_by_site = dict(personal_amp_by_site or {})
+            self._personal_amp = self._personal_amp_default
+            self._personal_amp_resolved = False
+            self._personal_batch_size_by_site = {
+                str(k): int(v) for k, v in (personal_batch_size_by_site or {}).items()}
+            self._train_batch_size_by_site = {
+                str(k): int(v) for k, v in (train_batch_size_by_site or {}).items()}
             self.grad_accumulation = max(1, grad_accumulation)
             self.memory_efficient = memory_efficient
             self._scaler = torch.cuda.amp.GradScaler(enabled=self.use_amp) if torch.cuda.is_available() else None
+            # Separate scaler for the Ditto personal pass: v has its OWN optimizer, and a scaler's
+            # scale factor / inf-tracking is per-optimizer-step, so sharing one across both passes
+            # would let a skipped step in one pass perturb the other's scale schedule. Built on the
+            # provisional PERSONAL amp setting and rebuilt if the per-site resolution differs.
+            self._v_scaler = torch.cuda.amp.GradScaler(enabled=self._personal_amp) if torch.cuda.is_available() else None
             self.pre_train_task_name = pre_train_task_name
             self.train_task_name = train_task_name
             self.submit_model_task_name = submit_model_task_name
@@ -701,6 +775,10 @@ class GMICFederatedExecutor(Executor):
         _bb, _hd = self._effective_group_lrs()
         self._logger.info("[EXEC] effective LRs at init: heads=%.3e backbone=%.3e (config lr_heads=%s lr_backbone=%s)",
                           _hd, _bb, self.lr_heads, self.lr_backbone)
+        try:
+            self._log_gpu_diagnostics()
+        except Exception as e:
+            self._logger.warning("[gpu-diag] diagnostics failed (non-fatal): %s", e)
 
         # 8. TensorBoard
         self.tb_writer = None
@@ -1200,6 +1278,47 @@ class GMICFederatedExecutor(Executor):
         reply.set_return_code(ReturnCode.OK)
         return reply
 
+    @staticmethod
+    def _unwrap_state_dict(sd):
+        """Tolerate a {'model'/'state_dict': sd} wrapper; our savers write a flat dict."""
+        if isinstance(sd, dict) and not any(torch.is_tensor(v) for v in sd.values()):
+            for wrap in ("model", "state_dict", "model_dict"):
+                if isinstance(sd.get(wrap), dict):
+                    return sd[wrap]
+        return sd
+
+    def _restore_personal_model(self, fl_ctx: FLContext):
+        """Crash-resume: reload the Ditto personal model v from its round-N checkpoint.
+
+        `_save_local_model` persists the DEPLOYED model, which for Ditto-family IS v, so
+        `{client}_gmic_model_round_{N}.pth` is exactly the state to restore (the same file the
+        shared-model methods use for their global reseed -- hence the method-dependent split in
+        _reseed_round). Raises rather than falling back to the pretrained init: a silent cold v
+        is the precise failure this exists to prevent, and it would not be visible in the logs.
+
+        The v optimizer's Adam moment estimates were never persisted and cannot be recovered; the
+        caller rebuilds them fresh, which re-warms within a few steps on an already-warm model.
+        """
+        client_name = fl_ctx.get_identity_name()
+        round_n = int(self.resume_from_local_round)
+        ckpt_dir = self.resume_ckpt_dir or self.results_dir
+        ckpt = os.path.join(ckpt_dir, f"{client_name}_gmic_model_round_{round_n}.pth")
+        if not os.path.exists(ckpt):
+            raise FileNotFoundError(
+                f"[resume] personal model checkpoint not found for {client_name}: {ckpt} "
+                f"(refusing to restart Ditto's personal model v from the pretrained init on a "
+                f"resumed run -- that would desynchronize v from the round-{round_n} global)")
+        # map_location="cpu": load_state_dict copies to the module's device anyway, so staging the
+        # checkpoint on the GPU only adds a transient full-model allocation on an already-tight card.
+        sd = self._unwrap_state_dict(torch.load(ckpt, map_location="cpu", weights_only=False))
+        load_res = self._v_model.load_state_dict(sd, strict=False)
+        self.log_info(
+            fl_ctx,
+            f"[resume] restored personal model v <- {ckpt} "
+            f"(missing={len(load_res.missing_keys)} unexpected={len(load_res.unexpected_keys)}); "
+            f"v optimizer state rebuilt fresh (never persisted)"
+        )
+
     def _reseed_round(self, fl_ctx: FLContext, shareable: Shareable) -> Shareable:
         """Resumed-job round 0: submit this client's cached round-N weights UNTRAINED.
 
@@ -1215,17 +1334,24 @@ class GMICFederatedExecutor(Executor):
         client_name = fl_ctx.get_identity_name()
         round_n = int(self.resume_from_local_round)
         ckpt_dir = self.resume_ckpt_dir or self.results_dir
-        ckpt = os.path.join(ckpt_dir, f"{client_name}_gmic_model_round_{round_n}.pth")
+        # WHICH file holds the shared global w^N is method-dependent. For the shared-model methods
+        # the deployed model IS w, so the plain round checkpoint is the aggregation contribution.
+        # For Ditto-family the deployed (and therefore saved) model is the PERSONAL model v --
+        # re-aggregating three sites' personal models would yield a meaningless "global" -- so read
+        # the SENT-global trajectory cache instead, which is exactly w^N (requires
+        # cache_global_trajectory, which the Ditto runs set).
+        if self.method in ("ditto", "ditto_modulewise"):
+            ckpt = os.path.join(ckpt_dir, "global_trajectory",
+                                f"{client_name}_global_round_{round_n}.pth")
+            what = f"sent global w^{round_n} (Ditto-family: deployed ckpt is the personal v, not w)"
+        else:
+            ckpt = os.path.join(ckpt_dir, f"{client_name}_gmic_model_round_{round_n}.pth")
+            what = f"round-{round_n} deployed global"
         if not os.path.exists(ckpt):
-            raise FileNotFoundError(f"[resume] cached checkpoint not found for {client_name}: {ckpt}")
+            raise FileNotFoundError(
+                f"[resume] cached checkpoint not found for {client_name}: {ckpt} (expected the {what})")
 
-        sd = torch.load(ckpt, map_location=self.device, weights_only=False)
-        # tolerate a {'model'/'state_dict': sd} wrapper; _save_local_model writes a flat dict
-        if isinstance(sd, dict) and not any(torch.is_tensor(v) for v in sd.values()):
-            for wrap in ("model", "state_dict", "model_dict"):
-                if isinstance(sd.get(wrap), dict):
-                    sd = sd[wrap]
-                    break
+        sd = self._unwrap_state_dict(torch.load(ckpt, map_location="cpu", weights_only=False))
         load_res = self._underlying.load_state_dict(sd, strict=False)
         self.log_info(
             fl_ctx,
@@ -1414,6 +1540,15 @@ class GMICFederatedExecutor(Executor):
         last_epoch_auc = 0.0
         last_epoch_acc = 0.0
 
+        train_bs = max(1, int(self._train_batch_size_by_site.get(
+            fl_ctx.get_identity_name(), self.batch_size)))
+        if train_bs < self.batch_size:
+            self.log_info(
+                fl_ctx,
+                f"[main-train] micro-batch={train_bs} (loader batch {self.batch_size} chunked; grads "
+                f"accumulated to the full batch, only BN sees the chunk) -- keeps the unfrozen "
+                f"backbone pass under this card's memory ceiling")
+
         for epoch in range(self.epochs):
             if abort_signal.triggered:
                 break
@@ -1446,35 +1581,53 @@ class GMICFederatedExecutor(Executor):
                 accumulate = self.grad_accumulation
                 if batch_idx % accumulate == 0:
                     self.optimizer.zero_grad(set_to_none=True)
-
                 amp_device = "cuda" if "cuda" in str(self.device) else "cpu"
-                with torch.autocast(device_type=amp_device, enabled=self.use_amp):
-                    outputs = self.model(inputs)
-                # Loss is computed OUTSIDE autocast, in fp32: F.binary_cross_entropy
-                # (global/local heads, on already-sigmoided probabilities) is unsafe under
-                # autocast and raises on GPU. The canonical AMP pattern autocasts only the
-                # forward; BCEWithLogits/backward run in fp32.
-                loss = self._compute_task_loss(outputs, targets) / accumulate
-                # FedProx: add (mu/2)||w - w_global||^2 to the w-pass loss.
-                # (No-op for fedavg/fedbn/local/ditto, where _prox_ref is None.)
+                total = inputs.size(0)
+                n_chunks = max(1, math.ceil(total / train_bs))
+                t_mb = time.time()
+                # Micro-chunk the loader batch so each forward/backward holds only `train_bs` worth of
+                # activations. Critical once the backbone UNFREEZES: autograd then retains all backbone
+                # activations for backward, and the full fp16 batch overflows a 16 GiB card -> host-RAM
+                # oversubscription -> deadlock. Loss OUTSIDE autocast in fp32 (BCE on sigmoided probs is
+                # unsafe under autocast). Each chunk's loss is weighted by its share and divided by the
+                # grad-accum factor, so the accumulated gradient == a single full loader-batch step's;
+                # only BN sees the smaller chunk. n_chunks==1 (train_bs >= batch) is the un-chunked path.
+                effective_loss = 0.0
+                for ci in range(n_chunks):
+                    cx = inputs[ci * train_bs:(ci + 1) * train_bs]
+                    cy = targets[ci * train_bs:(ci + 1) * train_bs]
+                    if cx.size(0) == 0:
+                        continue
+                    with torch.autocast(device_type=amp_device, enabled=self.use_amp):
+                        out = self.model(cx)
+                    loss_c = self._compute_task_loss(out, cy) * (cx.size(0) / total) / accumulate
+                    if self.use_amp and self._scaler is not None:
+                        self._scaler.scale(loss_c).backward()
+                    else:
+                        loss_c.backward()
+                    effective_loss += float(loss_c.item()) * accumulate
+                    # Malignant probability for batch AUC = sigmoid(fusion_logit)[:, 1]
+                    epoch_preds.extend(malignant_score(out).detach().cpu().numpy().reshape(-1))
+                    epoch_targets.extend(cy.detach().cpu().numpy().reshape(-1))
+                # FedProx: (mu/2)||w - w_global||^2, once per loader batch (None for
+                # fedavg/fedbn/local/ditto -> skipped).
                 if getattr(self, "_prox_ref", None) is not None:
-                    loss = loss + proximal_penalty(
-                        self._underlying, self._prox_ref, self._prox_lambda
-                    ) / accumulate
+                    prox = proximal_penalty(
+                        self._underlying, self._prox_ref, self._prox_lambda) / accumulate
+                    if self.use_amp and self._scaler is not None:
+                        self._scaler.scale(prox).backward()
+                    else:
+                        prox.backward()
+                    effective_loss += float(prox.item()) * accumulate
 
-                if self.use_amp and self._scaler is not None:
-                    self._scaler.scale(loss).backward()
-                    if (batch_idx + 1) % accumulate == 0:
+                if (batch_idx + 1) % accumulate == 0:
+                    if self.use_amp and self._scaler is not None:
                         self._scaler.step(self.optimizer)
                         self._scaler.update()
-                else:
-                    loss.backward()
-                    if (batch_idx + 1) % accumulate == 0:
+                    else:
                         self.optimizer.step()
 
-                effective_loss = loss.item() * accumulate
-                bsz = inputs.size(0)
-                total_samples += bsz
+                total_samples += total
                 epoch_loss += effective_loss
                 epoch_batches += 1
 
@@ -1489,15 +1642,11 @@ class GMICFederatedExecutor(Executor):
                     except Exception as e:
                         self.log_warning(fl_ctx, f"[devices] diagnostics failed: {e}")
 
-                # Malignant probability for batch AUC = sigmoid(fusion_logit)[:, 1]
-                pos_probs = malignant_score(outputs).detach().cpu().numpy().reshape(-1)
-                pos_targets = targets.detach().cpu().numpy().reshape(-1)
-
-                epoch_preds.extend(pos_probs)
-                epoch_targets.extend(pos_targets)
-
                 if self.train_log_batch_interval and (batch_idx % self.train_log_batch_interval == 0):
-                    self.log_info(fl_ctx, f"Epoch {epoch + 1} Batch {batch_idx} Loss {effective_loss:.4f}")
+                    self.log_info(
+                        fl_ctx,
+                        f"Epoch {epoch + 1} Batch {batch_idx} Loss {effective_loss:.4f} "
+                        f"({time.time() - t_mb:.1f}s) chunks={n_chunks}x{train_bs} {self._cuda_mem_str()}")
 
                 if self.memory_efficient and torch.cuda.is_available():
                     torch.cuda.empty_cache()
@@ -1586,9 +1735,14 @@ class GMICFederatedExecutor(Executor):
         model (e.g. the Ditto personal model v) to evaluate it instead.
         """
         eval_model = model if model is not None else self.model
-        core = evaluate_model(eval_model, self.data_loader, self.criterion, self.device,
-                              split=split, decision_threshold=self.decision_threshold,
-                              eval_threshold_sweep=self.eval_threshold_sweep)
+        # evaluate_model is one opaque call with no internal logging, so a stall inside it is
+        # invisible. The heartbeat keeps reporting from a blocked state (log-only, never aborts).
+        t0 = time.time()
+        with self._heartbeat("evaluate", {"site": fl_ctx.get_identity_name(), "split": split,
+                                          "t_last_progress": t0}):
+            core = evaluate_model(eval_model, self.data_loader, self.criterion, self.device,
+                                  split=split, decision_threshold=self.decision_threshold,
+                                  eval_threshold_sweep=self.eval_threshold_sweep)
         out = {
             "auc": float(core["auc"]),
             "accuracy": float(core["accuracy"]),
@@ -1668,6 +1822,13 @@ class GMICFederatedExecutor(Executor):
         # Lazily create the Ditto personal model v ONCE, from the (pretrained) w.
         if method in ("ditto", "ditto_modulewise") and self._v_model is None:
             self._v_model = copy.deepcopy(self._underlying).to(self.device)
+            # Crash-resume: v PERSISTS across rounds and is never re-derived from the global, so a
+            # resumed segment MUST reload it -- otherwise the run carries a warm round-N global but
+            # a personal model restarted from the pretrained init, silently desynchronizing the two
+            # trajectories by N rounds. Restored here (not in _reseed_round) because the reseed
+            # short-circuits before _consume_global, so v is first created on the next round.
+            if self.resume_from_local_round >= 0:
+                self._restore_personal_model(fl_ctx)
             try:
                 opt, _, _ = configure_optimizers(self._v_model, self._opt_args)
             except Exception as e:
@@ -1678,13 +1839,140 @@ class GMICFederatedExecutor(Executor):
             self.log_info(fl_ctx, "[ditto] initialized personal model v from pretrained init (persists across rounds)")
 
 
+    def _sync(self):
+        """Wait for queued GPU work, so the CURRENT stage label is the one that wedged.
+
+        Call AFTER an op while `stage` still names it: if the sync blocks, the heartbeat reports
+        that op rather than the next sync point. No-op unless stage_sync is set (and off CUDA).
+        """
+        if getattr(self, "stage_sync", False) and torch.cuda.is_available():
+            torch.cuda.synchronize()
+
+    def _log_gpu_diagnostics(self):
+        """Log GPU / CUDA / cuDNN / driver identity + effective allocator config, ONCE at init.
+
+        Every fact here is obtainable in-process, so a remote site we cannot shell into still
+        reports exactly which card + driver + cuDNN it is running -- the info needed to decide
+        whether an fp16 backward kernel that deadlocks is a known GPU/driver issue. total VRAM in
+        particular settles the card model (an fp16 personal-pass hang was observed with ~18.9 GiB
+        RESERVED, which is impossible on a 16 GiB card, so HPU is NOT the assumed 16 GiB A4000).
+        """
+        alloc_conf = os.environ.get("PYTORCH_CUDA_ALLOC_CONF", "<unset>")
+        self._logger.info("[gpu-diag] PYTORCH_CUDA_ALLOC_CONF=%s", alloc_conf)
+        if not torch.cuda.is_available():
+            self._logger.info("[gpu-diag] CUDA not available (CPU run)")
+            return
+        try:
+            props = torch.cuda.get_device_properties(0)
+            self._logger.info(
+                "[gpu-diag] device=%s total_mem=%.1f GiB torch=%s cuda=%s cudnn=%s",
+                props.name, props.total_memory / 2**30, torch.__version__,
+                torch.version.cuda, torch.backends.cudnn.version())
+        except Exception as e:
+            self._logger.warning("[gpu-diag] device props unavailable: %s", e)
+        # Driver version is not exposed by torch; nvidia-smi runs inside the container (no host
+        # access needed). Best-effort, short timeout, never fatal.
+        try:
+            import subprocess
+            out = subprocess.run(
+                ["nvidia-smi", "--query-gpu=name,driver_version,memory.total",
+                 "--format=csv,noheader"],
+                capture_output=True, text=True, timeout=10)
+            if out.stdout.strip():
+                self._logger.info("[gpu-diag] nvidia-smi: %s", out.stdout.strip().replace("\n", " | "))
+        except Exception as e:
+            self._logger.info("[gpu-diag] nvidia-smi unavailable (non-fatal): %s", e)
+
+    @staticmethod
+    def _cuda_mem_str():
+        """allocated/reserved/peak, for logs. Empty string off-CUDA so callers stay unconditional."""
+        if not torch.cuda.is_available():
+            return ""
+        return (f"mem {torch.cuda.memory_allocated() / 2**30:.2f}/"
+                f"{torch.cuda.memory_reserved() / 2**30:.2f}/"
+                f"{torch.cuda.max_memory_allocated() / 2**30:.2f} GiB alloc/resv/peak")
+
+    @contextlib.contextmanager
+    def _heartbeat(self, label, state):
+        """Background thread that logs `label` + `state` every heartbeat_interval_s.
+
+        Exists because per-batch logging goes silent in exactly the situation you most need it:
+        when the main thread is blocked inside a CUDA kernel, a stalled mount read, or a wedged
+        driver. A separate thread keeps emitting, so a remote site that cannot be shelled into
+        still shows WHERE it stopped and for how long -- the difference between "slow" and "hung"
+        without touching the box.
+
+        Logs only; it never aborts or raises, so a slow-but-healthy site is never killed. `state`
+        is a mutable dict the caller updates (e.g. {"batch": i}); it is read, not written, here.
+
+        Uses self._logger directly rather than log_info(fl_ctx): FLContext is not documented as
+        thread-safe, and a diagnostic must never be able to destabilize the run it is observing.
+        """
+        interval = int(getattr(self, "heartbeat_interval_s", 0) or 0)
+        if interval <= 0:
+            yield state
+            return
+        who = state.get("site", "?")
+        stop = threading.Event()
+        started = time.time()
+
+        def _beat():
+            while not stop.wait(interval):
+                now = time.time()
+                since = now - float(state.get("t_last_progress", started))
+                self._logger.warning(
+                    "[heartbeat] site=%s %s: %s | %.0fs since last progress, %.0fs in phase | %s "
+                    "(no output between beats means the phase is blocked, not idle)",
+                    who, label,
+                    " ".join(f"{k}={v}" for k, v in state.items()
+                             if k not in ("site", "t_last_progress")),
+                    since, now - started, self._cuda_mem_str(),
+                )
+
+        t = threading.Thread(target=_beat, name=f"hb-{label}", daemon=True)
+        t.start()
+        try:
+            yield state
+        finally:
+            stop.set()
+            t.join(timeout=5)
+
+    def _resolve_personal_amp(self, fl_ctx: FLContext):
+        """Fix the personal-pass precision for THIS site, once, from the per-site override map.
+
+        Single config deployed to every site: the map (e.g. {"HPU": false}) lets HPU run its
+        personal pass in fp32 -- its A4000 faults on the fp16 backward -- while RSNA/UHCC keep AMP,
+        with no per-site app duplication and no forced A100 move. Rebuilds the v scaler to match the
+        resolved precision. Idempotent: resolves + logs exactly once.
+        """
+        if getattr(self, "_personal_amp_resolved", False):
+            return
+        site = fl_ctx.get_identity_name()
+        overridden = site in self._personal_amp_by_site
+        eff = bool(self._personal_amp_by_site.get(site, self._personal_amp_default))
+        if eff != self._personal_amp and torch.cuda.is_available():
+            self._v_scaler = torch.cuda.amp.GradScaler(enabled=eff)
+        self._personal_amp = eff
+        self._personal_amp_resolved = True
+        self.log_info(
+            fl_ctx,
+            f"[ditto] personal-pass precision for site={site}: amp={eff} "
+            f"({'per-site override' if overridden else 'default'}; main use_amp={bool(self.use_amp)})")
+
     def _train_personal_model(self, fl_ctx: FLContext, abort_signal: Signal):
         """Ditto personal pass: train v for self.epochs with task_loss(v) + proximal(v, w_ref).
 
         v and its optimizer are instance attributes that persist across rounds; v is
         never reset to the global. lambda is a scalar (ditto) or a per-group dict
-        (ditto_modulewise: {global, local, fusion}). Runs in plain fp32 (no AMP) for
-        simplicity/correctness — this is the deployed model, not the comms payload.
+        (ditto_modulewise: {global, local, fusion}).
+
+        Precision follows `use_amp`, exactly like the main w pass. This pass used to run plain
+        fp32 while the main pass ran under autocast, which made it need ~2x the activation memory
+        of the pass right before it -- the deployed model was the single most expensive thing in
+        the round. That is a hard hardware floor, not a tuning knob: at batch 32 / 2944x1920 it
+        OOMs on 16GB- and 24GB-class cards (T4, L4) and only fits on A100-class memory. Following
+        use_amp also makes v numerically consistent with every shared global in the study, all of
+        which have always trained under autocast.
         """
         v = self._v_model
         opt = self._v_optimizer
@@ -1692,34 +1980,134 @@ class GMICFederatedExecutor(Executor):
             self.log_warning(fl_ctx, "[ditto] personal model/ref not ready; skipping personal pass")
             return
         lam = self.ditto_lambda if self.method == "ditto" else self.lam_dict
-        self.log_info(fl_ctx, f"[ditto] personal pass: epochs={self.epochs} lambda={lam}")
+        self._resolve_personal_amp(fl_ctx)  # per-site precision, once (fp32 for HPU, AMP elsewhere)
+        personal_amp = self._personal_amp
+        scaler = getattr(self, "_v_scaler", None) if personal_amp else None
+        self.log_info(fl_ctx, f"[ditto] personal pass: epochs={self.epochs} lambda={lam} "
+                              f"amp={bool(personal_amp)} (main use_amp={bool(self.use_amp)}) "
+                              f"stage_sync={bool(self.stage_sync)}")
+        # The main loop has just filled the caching allocator; hand the reserve back before this
+        # pass allocates its own activations. Purely an allocator hint -- it frees nothing live
+        # and does not change the math.
+        if self.memory_efficient and torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            self.log_info(
+                fl_ctx,
+                f"[ditto] pre-personal-pass cache release: "
+                f"{torch.cuda.memory_allocated() / 2**30:.2f} GiB allocated / "
+                f"{torch.cuda.memory_reserved() / 2**30:.2f} GiB reserved"
+            )
         v.train()
+        client_name = fl_ctx.get_identity_name()
+        personal_bs = max(1, int(self._personal_batch_size_by_site.get(client_name, self.batch_size)))
+        if personal_bs < self.batch_size:
+            self.log_info(
+                fl_ctx,
+                f"[ditto] personal micro-batch={personal_bs} (loader batch {self.batch_size} split "
+                f"into chunks; gradients accumulated to the full effective batch, only BN sees the "
+                f"smaller chunk) -- keeps the personal pass under this card's memory ceiling")
         for epoch in range(self.epochs):
             if abort_signal.triggered:
                 break
             n_batches = 0
-            for inputs, targets, metadata in self.data_loader.get_batch_iterator('train'):
-                if abort_signal.triggered:
-                    break
-                inputs = inputs.to(self.device)
-                targets = targets.to(self.device)
-                opt.zero_grad(set_to_none=True)
-                outputs = v(inputs)
-                loss = self._compute_task_loss(outputs, targets)
-                loss = loss + proximal_penalty(v, self._global_ref, lam)
-                # Stability guard: the personal pass runs in fp32 with no AMP GradScaler, so unlike
-                # the main loop it has no built-in inf/nan-skip. The personal model v PERSISTS across
-                # rounds, so a single non-finite step would poison it for the whole run (-> NaN val
-                # AUC -> reported as 0.0). Skip non-finite losses and clip grads so extreme lambdas
-                # can't silently zero a site.
-                if not torch.isfinite(loss):
-                    self.log_warning(fl_ctx, f"[ditto] non-finite personal loss (epoch {epoch + 1}); skipping step")
-                    continue
-                loss.backward()
-                torch.nn.utils.clip_grad_norm_(v.parameters(), max_norm=5.0)
-                opt.step()
-                n_batches += 1
-            self.log_info(fl_ctx, f"[ditto] personal epoch {epoch + 1}/{self.epochs} done ({n_batches} batches)")
+            n_skipped = 0
+            t_epoch = time.time()
+            # batch=-1 + stage=load means we never got the FIRST batch out of the data loader --
+            # that alone separates an I/O/loader stall from a compute stall, without a shell on
+            # the box. `stage` then narrows a compute stall to the exact operation.
+            state = {"site": client_name, "epoch": f"{epoch + 1}/{self.epochs}", "batch": -1,
+                     "stage": "load", "t_last_progress": t_epoch}
+            with self._heartbeat("ditto-personal", state):
+                for batch_idx, (inputs, targets, metadata) in enumerate(
+                        self.data_loader.get_batch_iterator('train')):
+                    if abort_signal.triggered:
+                        break
+                    t_batch = time.time()
+                    state["batch"] = batch_idx
+                    state["stage"] = "h2d"
+                    inputs = inputs.to(self.device)
+                    targets = targets.to(self.device)
+                    total = inputs.size(0)
+                    n_chunks = max(1, math.ceil(total / personal_bs))
+                    amp_device = "cuda" if "cuda" in str(self.device) else "cpu"
+                    opt.zero_grad(set_to_none=True)
+                    # Micro-chunk the loader batch so each forward/backward only holds `personal_bs`
+                    # worth of activations. Gradients accumulate across chunks, so the optimizer step
+                    # equals a single full-batch step; only BatchNorm sees the smaller chunk. When
+                    # n_chunks==1 (personal_bs >= batch_size) this is the un-chunked path.
+                    nonfinite = False
+                    task_loss_sum = 0.0
+                    state["stage"] = "forward/backward"
+                    for ci in range(n_chunks):
+                        cx = inputs[ci * personal_bs:(ci + 1) * personal_bs]
+                        cy = targets[ci * personal_bs:(ci + 1) * personal_bs]
+                        if cx.size(0) == 0:
+                            continue
+                        with torch.autocast(device_type=amp_device, enabled=personal_amp):
+                            out = v(cx)
+                        # Loss OUTSIDE autocast in fp32 (GMIC heads emit sigmoided probs; BCE is
+                        # unsafe under autocast). Weighted by the chunk's share of the batch so the
+                        # accumulated gradient equals a single full-batch step's (mean-reduced loss
+                        # + the per-call L1 term both scale correctly, since the weights sum to 1).
+                        loss_c = self._compute_task_loss(out, cy) * (cx.size(0) / total)
+                        # Stability guard: v PERSISTS across rounds, so one non-finite step poisons
+                        # it for the whole run. Drop the ENTIRE batch's step if any chunk is bad.
+                        if not torch.isfinite(loss_c):
+                            nonfinite = True
+                            break
+                        (scaler.scale(loss_c) if (scaler is not None and personal_amp)
+                         else loss_c).backward()
+                        task_loss_sum += float(loss_c.item())
+                    if nonfinite:
+                        n_skipped += 1
+                        opt.zero_grad(set_to_none=True)
+                        self.log_warning(
+                            fl_ctx,
+                            f"[ditto] non-finite personal loss (epoch {epoch + 1} "
+                            f"batch {batch_idx}); skipping step")
+                        state["t_last_progress"] = time.time()
+                        continue
+                    # Proximal penalty ONCE per optimizer step -- it regularizes the weights, not
+                    # per-sample, so adding it per chunk would multiply its strength.
+                    state["stage"] = "prox"
+                    prox = proximal_penalty(v, self._global_ref, lam)
+                    if not torch.isfinite(prox):
+                        n_skipped += 1
+                        opt.zero_grad(set_to_none=True)
+                        self.log_warning(fl_ctx, f"[ditto] non-finite proximal (epoch {epoch + 1} "
+                                                 f"batch {batch_idx}); skipping step")
+                        state["t_last_progress"] = time.time()
+                        continue
+                    (scaler.scale(prox) if (scaler is not None and personal_amp) else prox).backward()
+                    state["stage"] = "step"
+                    if scaler is not None and personal_amp:
+                        scaler.unscale_(opt)  # before clip, so max_norm applies to true gradients
+                        torch.nn.utils.clip_grad_norm_(v.parameters(), max_norm=5.0)
+                        scaler.step(opt)
+                        scaler.update()
+                    else:
+                        torch.nn.utils.clip_grad_norm_(v.parameters(), max_norm=5.0)
+                        opt.step()
+                    self._sync()
+                    n_batches += 1
+                    state["stage"] = "load"  # back to waiting on the iterator for the next batch
+                    state["t_last_progress"] = time.time()
+                    # Per-batch progress (mirrors the main loop's train_log_batch_interval). The
+                    # displayed loss is the full-batch task loss + proximal; elapsed makes "slow"
+                    # quantifiable, and chunks=NxM shows the micro-batching in effect.
+                    if self.train_log_batch_interval and (batch_idx % self.train_log_batch_interval == 0):
+                        self.log_info(
+                            fl_ctx,
+                            f"[ditto] personal epoch {epoch + 1} batch {batch_idx} "
+                            f"loss {task_loss_sum + float(prox.item()):.4f} "
+                            f"({time.time() - t_batch:.1f}s) chunks={n_chunks}x{personal_bs} "
+                            f"{self._cuda_mem_str()}")
+            dt = time.time() - t_epoch
+            self.log_info(
+                fl_ctx,
+                f"[ditto] personal epoch {epoch + 1}/{self.epochs} done ({n_batches} batches, "
+                f"{n_skipped} skipped non-finite, {dt:.1f}s total, "
+                f"{dt / max(n_batches, 1):.1f}s/batch)")
 
 
     def _dump_baseline(self, fl_ctx: FLContext):
