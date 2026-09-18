@@ -1,8 +1,0 @@
-{
-    "name": "gmic_job_ditto_mw_g0.01_l0.5_f0_amp_3client",
-    "min_clients": 3,
-    "mandatory_clients": [],
-    "deploy_map": {
-      "app": ["@ALL"]
-    }
-  }

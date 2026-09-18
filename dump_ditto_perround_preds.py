@@ -35,8 +35,8 @@ CLIENTS = ["HIPIMR", "RSNA-AU", "RSNA-US"]
 #   CUDA_VISIBLE_DEVICES=3 python dump_ditto_perround_preds.py mw    # ...on physical GPU 3
 # Distinct out dirs per job, so two invocations can run concurrently on different GPUs.
 ALL_JOBS = {
-    "ditto": (os.path.join(HERE, "gmic_job_ditto_sim"),    "ditto_perround"),
-    "mw":    (os.path.join(HERE, "gmic_job_ditto_mw_sim"), "ditto_modulewise_perround"),
+    "ditto": (os.path.join(HERE, "ditto"),    "ditto_perround"),
+    "mw":    (os.path.join(HERE, "ditto_mw"), "ditto_modulewise_perround"),
 }
 
 

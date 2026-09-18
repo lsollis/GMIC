@@ -34,13 +34,13 @@ CPU clone. Sanity check after launch: each site's round-0 val AUC should ~= its 
 Example
 -------
   # scalar lambda sweep, replaying HIPIMR's cached global trajectory
-  python replay_sweep.py --base-job ../gmic_job \
+  python replay_sweep.py --base-job ../<job> \
     --traj-dir /workspace/sim/fedavg/HIPIMR/incoming_global --traj-prefix HIPIMR \
     --lambdas 0.05,0.1,0.5 --clients HIPIMR,RSNA-AU,RSNA-US --gpu 0 \
     --out /workspace/sim/ditto_replay/sweep_summary.json
 
   # module-wise, anchored at 0.1, global tethered upward / heads freer
-  python replay_sweep.py --base-job ../gmic_job --traj-dir ... --traj-prefix HIPIMR --modulewise \
+  python replay_sweep.py --base-job ../<job> --traj-dir ... --traj-prefix HIPIMR --modulewise \
     --anchor 0.1 --global-values 0.1,0.5,1.0 --local-values 0.01,0.05,0.1 --fusion-values 0.01,0.05,0.1
 """
 from __future__ import annotations

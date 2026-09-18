@@ -30,7 +30,7 @@ the offline path is proven to reproduce the in-run per-site numbers exactly.
 - `deployed_local` — each site's **as-deployed** model at round N (a different model per site →
   per-site only, never pooled).
 
-## Config (already set in `gmic_job_hpu`)
+## Config (already set in `<job>`)
 
 `config_fed_client.json` (executor args):
 - `"salvage_eval_rounds": [6, 8, 10, 14, 23, 26]` — shortlist = pooled candidates {6,8,10} ∪ per-site
@@ -49,7 +49,7 @@ epochs=1) — computed automatically per site, nothing to supply.
 
 ## Run it
 
-Submit the `gmic_job_hpu` job. Read the per-site results off each client, then pool offline:
+Submit the `<job>` job. Read the per-site results off each client, then pool offline:
 
 ```
 # on each client (results_dir persists with the client job folder)

@@ -14,9 +14,9 @@ seed). It is **identical at every site**, so each node already holds the whole t
 
 ## REAL-WORLD path (the 3 physical nodes)
 
-### 1. FedAvg real-world — `gmic_job_hpu`
+### 1. FedAvg real-world — `<job>`
 
-In `gmic_job_hpu/app/config/config_fed_client.json` set:
+In `<job>/app/config/config_fed_client.json` set:
 - `"method": "fedavg"` (Ditto's global is FedAvg, not FedProx)
 - `"cache_incoming_global": true` (the anchor trajectory — keep all rounds)
 - remove/empty `"salvage_eval_rounds"` (so it's a normal training run, not salvage)
@@ -45,7 +45,7 @@ environment (it imports the same `app/custom`) and run, with `--clients` = that 
 
 ```bash
 # on the HIPIMR node
-python replay_sweep.py --base-job <gmic_job_hpu> --clients HIPIMR \
+python replay_sweep.py --base-job <<job>> --clients HIPIMR \
   --traj-dir <run>/incoming_global --traj-prefix HIPIMR \
   --lambdas 0.05,0.1,0.5 --gpu 0 --out uhcc_replay.json
 # on the RSNA-AU node (Windows OK)        -> --clients RSNA-AU --traj-prefix RSNA-AU --out hpu_replay.json
@@ -85,10 +85,10 @@ local) — same data/seed, so results are consistent, and RSNA-AU is out of the 
 
 ```bash
 # one FedAvg run that caches the trajectory
-python ditto_sweep/launcher.py --base-job ../gmic_job --fedavg --rounds 60 \
+python ditto_sweep/launcher.py --base-job ../<job> --fedavg --rounds 60 \
   --gpu-pools "0,1,2" --output-base /workspace/sim/fedavg --work-root /workspace/sim/fedavg_runs
 # central replay (all sites on one box -> no --combine needed)
-python ditto_sweep/replay_sweep.py --base-job ../gmic_job \
+python ditto_sweep/replay_sweep.py --base-job ../<job> \
   --traj-dir /workspace/sim/fedavg/fedavg/HIPIMR/incoming_global --traj-prefix HIPIMR \
   --lambdas 0.05,0.1,0.5 --clients HIPIMR,RSNA-AU,RSNA-US --gpu 0 --out /workspace/sim/ditto_replay.json
 ```

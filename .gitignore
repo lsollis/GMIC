@@ -26,7 +26,13 @@ gmic-localhost-fedavg/
 # Shared FL code lives once at the top-level custom/ folder and is COPIED into a job's
 # app/custom/ before running it (see README "Running a job"). Keep those per-job copies
 # out of git so there is a single source of truth. (pool_report_job keeps its own custom.)
-gmic_job*/app/custom/
+fedavg/app/custom/
+fedprox/app/custom/
+fedbn/app/custom/
+ditto/app/custom/
+ditto_mw/app/custom/
+centralized/app/custom/
+local/app/custom/
 
 # NVFLARE certificates and configs
 *.crt

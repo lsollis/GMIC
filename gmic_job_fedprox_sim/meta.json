@@ -1,8 +1,0 @@
-{
-  "name": "gmic_job_fedprox_sim",
-  "min_clients": 3,
-  "mandatory_clients": ["HIPIMR", "RSNA-AU", "RSNA-US"],
-  "deploy_map": {
-    "app": ["@ALL"]
-  }
-}

@@ -7,7 +7,7 @@
 #
 # Run this BEFORE submitting a job (after `git pull`), e.g.:
 #   ./tools/stamp_git_commit.sh
-# Then submit gmic_job_hpu as usual.
+# Then submit <job> as usual.
 #
 # The stamp is HEAD's short hash plus a `-dirty` suffix if the working tree has uncommitted
 # changes, so the log can't claim a clean commit when the deployed code was actually edited.

@@ -11,7 +11,7 @@ For each λ it renders a job from `--base-job` (config **and** custom code) with
 simulator` with 3 clients (HIPIMR/RSNA-AU/RSNA-US) each on its own GPU, then reads each client's
 best **val** AUC and ranks λ by worst-site.
 
-- **Single config source**: `gmic_job/app/config` + `gmic_job/meta.json` (no duplicate
+- **Single config source**: `<job>/app/config` + `<job>/meta.json` (no duplicate
   template — the config you review is the one that runs).
 - **Per-client isolation** on the shared filesystem: executor `data_path_map` (CSVs),
   `preprocess_cache_dir_map` (crops), and `{site}` path substitution.
@@ -28,11 +28,11 @@ best **val** AUC and ranks λ by worst-site.
 
 ## Prerequisites on the DGX
 1. **All three sites' data present locally**, at the paths in
-   `gmic_job/app/config/config_fed_client.json` → `data_path_map` (CSVs) and the full image
+   `<job>/app/config/config_fed_client.json` → `data_path_map` (CSVs) and the full image
    paths *inside* those CSVs (`file_path` column). The DGX must hold HIPIMR + RSNA-AU + RSNA images.
 2. `sample_model_5.p` at `/workspace/models/sample_model_5.p` (fail-loud if missing).
 3. `nvflare` on PATH; GPUs 1–6 free (GPU 0 is the live FL run).
-4. Edit `gmic_job/app/config/config_fed_client.json` if your CSV paths or cache locations
+4. Edit `<job>/app/config/config_fed_client.json` if your CSV paths or cache locations
    differ from the defaults (`/workspace/data/...`,
    `/workspace/data/processed/ditto_sim_cache/<site>`).
 
@@ -41,12 +41,12 @@ best **val** AUC and ranks λ by worst-site.
 cd ditto_sweep
 
 # optional explicit cache build (otherwise the sweep auto-builds once on first run):
-python launcher.py --base-job ../gmic_job --prepare-cache \
+python launcher.py --base-job ../<job> --prepare-cache \
   --gpu-pools "1,2,3" --output-base /workspace/sim/ditto --work-root /workspace/sim/ditto_runs
 
 # the sweep:
 python launcher.py \
-  --base-job ../gmic_job \
+  --base-job ../<job> \
   --lambdas 0.01,0.05,0.1,0.5,1.0,2.0 \
   --rounds 20 \
   --gpu-pools "1,2,3;4,5,6" \
@@ -64,7 +64,7 @@ analogue to the Ditto λ search. The base FedProx run used μ=0.01, which was to
 around it.
 ```bash
 python launcher.py \
-  --base-job ../gmic_job --fedprox \
+  --base-job ../<job> --fedprox \
   --mus 0.001,0.01,0.05,0.1,0.5,1.0 \
   --rounds 20 \
   --gpu-pools "1,2,3;4,5,6" \

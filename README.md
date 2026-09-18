@@ -49,8 +49,8 @@ cross-demographic equity:
 | Path | Purpose |
 |------|---------|
 | `custom/` | **The FL code — single source of truth** (`bc_executor.py`, `fl_utils.py`, `data_loader/`, `model/`, `train/`, …). Copied into a job before running it. |
-| `gmic_job/`, `gmic_job_hpu/` | Real (multi-site) federated jobs — **config only** (`app/config/`, `meta.json`). |
-| `gmic_job_ditto_sim/`, `gmic_job_ditto_mw_sim/`, `gmic_job_fedprox_sim/`, `gmic_job_fedbn_sim/` | NVFLARE **simulator** jobs, one per method — config only. |
+| `fedavg/`, `fedprox/`, `fedbn/`, `ditto/`, `ditto_mw/` | Federated jobs, **one per method** — config only (`app/config/`, `meta.json`). |
+| `centralized/`, `local/` | Single-node (1-client) baselines — config only. `centralized` = all sites' data pooled in one CSV; `local` = one site's CSV. |
 | `pool_report_job/` | Pools each site's per-round predictions into combined AUC/DeLong/operating-point statistics (keeps its own small executor). |
 | `ditto_sweep/` | Hyperparameter sweeps (Ditto λ; FedProx μ). |
 | `subgroup_fairness.py` | Per-race/ethnicity fairness for one site's deployed model. |
@@ -62,20 +62,39 @@ cross-demographic equity:
 
 ## Running a job
 
-The FL code is **not duplicated** into every job — it lives once in `custom/`.
-Each job folder holds only its config (which method + hyperparameters). Before
-running a job, copy the shared code into it:
+There is **one folder per training regime** — `fedavg`, `fedprox`, `fedbn`,
+`ditto`, `ditto_mw` (federated, 3 sites), plus `centralized` and `local`
+(single-node baselines). Each holds only its config (the `method` flag +
+hyperparameters); the FL code lives once in `custom/`. Before running a job,
+copy the code into it:
 
 ```bash
-cp -r custom gmic_job_ditto_sim/app/custom     # code into the job you want to run
-# then submit it (real deployment) or simulate it, e.g.:
-nvflare simulator gmic_job_ditto_sim -w /tmp/ws -n 3 -t 3
+cp -r custom ditto/app/custom          # code into the job (regime) you want to run
 ```
 
-The per-job `app/custom/` copies are git-ignored, so the single source of truth
-stays `custom/`; edit code there and re-copy. Pick the job whose config matches
-the method you want — the four `*_sim` jobs are one per method for the local
-simulator; `gmic_job` / `gmic_job_hpu` are the real multi-site configs.
+Then run it in **either mode** — the job config is the same, only the launch
+and the environment paths differ:
+
+```bash
+# (a) local simulator — N clients on one machine
+nvflare simulator ditto -w /tmp/ws -n 3 -t 3
+
+# (b) real multi-site — provision (see "Deploying"), then submit from the admin console
+```
+
+The per-job `app/custom/` copies are git-ignored, so `custom/` stays the single
+source of truth — edit code there and re-copy. **Sim vs. real is not a different
+job**: point `data_path_map`, `output_dir`, and the preprocess-cache paths at your
+environment (`{site}` is substituted per client in both modes). Optional
+constrained-GPU knobs (`personal_amp_by_site`, `*_batch_size_by_site`,
+`heartbeat_interval_s`) let a memory-limited site participate — see "Training on a
+memory-constrained GPU"; they default off.
+
+**Centralized / local-only baselines.** `centralized/` and `local/` are 1-client
+jobs (`method: "local"`, `num_clients: 1`): they train a single model on one node.
+Point `data_path` at the pooled CSV (all sites) for `centralized`, or at one site's
+CSV for `local`, and run the same way (`nvflare simulator centralized -n 1 -t 1`).
+Total epochs = `num_rounds × epochs`.
 
 ## Requirements & setup
 

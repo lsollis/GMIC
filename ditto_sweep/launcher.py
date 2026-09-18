@@ -33,17 +33,17 @@ Modes
 Examples
 --------
   # scalar lambda sweep
-  python launcher.py --base-job ../gmic_job --lambdas 0.01,0.05,0.1,0.5,1.0,2.0 \
+  python launcher.py --base-job ../<job> --lambdas 0.01,0.05,0.1,0.5,1.0,2.0 \
     --rounds 20 --gpu-pools "1,2,3;4,5,6" \
     --output-base /workspace/sim/ditto --work-root /workspace/sim/ditto_runs
 
   # fedprox mu sweep (fair counterpart to the ditto lambda sweep)
-  python launcher.py --base-job ../gmic_job --fedprox --mus 0.001,0.01,0.05,0.1,0.5,1.0 \
+  python launcher.py --base-job ../<job> --fedprox --mus 0.001,0.01,0.05,0.1,0.5,1.0 \
     --rounds 20 --gpu-pools "1,2,3;4,5,6" \
     --output-base /workspace/sim/fedprox --work-root /workspace/sim/fedprox_runs
 
   # module-wise sweep anchored at the scalar best (0.1)
-  python launcher.py --base-job ../gmic_job --modulewise --anchor 0.1 \
+  python launcher.py --base-job ../<job> --modulewise --anchor 0.1 \
     --group-values 0.05,0.1,0.5,1.0 --rounds 20 --gpu-pools "1,2,3;4,5,6" \
     --output-base /workspace/sim/ditto_mw --work-root /workspace/sim/ditto_mw_runs
 """
@@ -434,7 +434,7 @@ def print_report(results, clients, metric, title="DITTO LAMBDA SWEEP RESULTS"):
 def main():
     ap = argparse.ArgumentParser(description="Ditto (scalar or module-wise) lambda sweep via the NVFLARE simulator.")
     ap.add_argument("--base-job", required=True,
-                    help="ditto job dir providing app/config + app/custom (e.g. ../gmic_job). "
+                    help="ditto job dir providing app/config + app/custom (e.g. ../<job>). "
                          "Its config is the single source; the launcher overrides only the method + "
                          "lambda field(s), num_rounds, and the output/tb/log paths per run.")
     ap.add_argument("--lambdas", default="0.01,0.05,0.1,0.5,1.0,2.0",
