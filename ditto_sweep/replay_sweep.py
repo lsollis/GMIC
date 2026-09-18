@@ -60,9 +60,9 @@ import torch
 # on Windows (the RSNA-AU node), so derive from the OS temp dir.
 _SCRATCH = os.path.join(tempfile.gettempdir(), "ditto_replay_scratch")
 
-# Estimators/components live in the base job's app/custom; add it to the path.
+# Estimators/components live in the shared repo-root custom/ (a sibling of base_job); path it.
 def _add_custom_to_path(base_job):
-    custom = os.path.abspath(os.path.join(base_job, "app", "custom"))
+    custom = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(base_job)), "custom"))
     if custom not in sys.path:
         sys.path.insert(0, custom)
     return custom

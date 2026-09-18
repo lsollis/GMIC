@@ -18,11 +18,10 @@ DIRTY=""
 git -C "$ROOT" diff --quiet || DIRTY="-dirty"
 STAMP="${HASH}${DIRTY}"
 
-for d in gmic_job gmic_job_hpu; do
-  cdir="$ROOT/$d/app/custom"
-  if [ -d "$cdir" ]; then
-    echo "$STAMP" > "$cdir/GIT_COMMIT"
-    echo "stamped $d/app/custom/GIT_COMMIT = $STAMP"
-  fi
-done
-echo "Done. Submit your job now; clients will log git=$STAMP."
+# Stamp the shared custom/ (copied into a job's app/custom before running); the copy carries it.
+cdir="$ROOT/custom"
+if [ -d "$cdir" ]; then
+  echo "$STAMP" > "$cdir/GIT_COMMIT"
+  echo "stamped custom/GIT_COMMIT = $STAMP"
+fi
+echo "Done. Copy custom/ into your job and submit; clients will log git=$STAMP."

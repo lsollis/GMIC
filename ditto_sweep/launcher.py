@@ -115,8 +115,9 @@ def render_job(label, arg_overrides, rounds, base_job, work_root, output_base, c
     cfg_dir = os.path.join(app_dir, "config")
     os.makedirs(cfg_dir, exist_ok=True)
 
-    # 1) custom code (executor, model, data_loader, ...) from the base job, verbatim
-    src_custom = os.path.join(base_job, "app", "custom")
+    # 1) custom code (executor, model, data_loader, ...) from the shared repo-root custom/
+    #    (jobs no longer carry their own copy; custom/ is a sibling of base_job)
+    src_custom = os.path.join(os.path.dirname(os.path.abspath(base_job)), "custom")
     dst_custom = os.path.join(app_dir, "custom")
     if os.path.isdir(dst_custom):
         shutil.rmtree(dst_custom)

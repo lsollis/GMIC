@@ -63,10 +63,11 @@ def _breast_val_auc(rdir, site, out_tag, r, breast_aggregate):
 
 
 def run_job(job_dir, out_tag):
-    custom = os.path.join(job_dir, "app", "custom")
+    # The FL code lives once at the repo-root custom/ (jobs no longer carry their own copy;
+    # see README "Running a job"). Import it from there; the job dir supplies only the config.
+    custom = os.path.join(HERE, "custom")
     if not os.path.isdir(custom):
-        print(f"[error] no app/custom at {custom} -- run from the repo (script must sit next to "
-              f"gmic_job_ditto_sim/), or fix the job path.")
+        print(f"[error] no shared custom/ at {custom} -- run this script from the repo root.")
         return
     sys.path.insert(0, custom)
     from bc_executor import GMICFederatedExecutor

@@ -48,10 +48,10 @@ cross-demographic equity:
 
 | Path | Purpose |
 |------|---------|
-| `gmic_job_hpu/` | Real (multi-site) federated job; the executor lives at `app/custom/bc_executor.py`. |
-| `gmic_job/` | Base federated job (single canonical executor, shared by all jobs). |
-| `gmic_job_ditto_sim/`, `gmic_job_ditto_mw_sim/`, `gmic_job_fedprox_sim/`, `gmic_job_fedbn_sim/` | NVFLARE **simulator** jobs, one per method, for local multi-site experiments. |
-| `pool_report_job/` | Pools each site's per-round predictions into combined AUC/DeLong/operating-point statistics. |
+| `custom/` | **The FL code — single source of truth** (`bc_executor.py`, `fl_utils.py`, `data_loader/`, `model/`, `train/`, …). Copied into a job before running it. |
+| `gmic_job/`, `gmic_job_hpu/` | Real (multi-site) federated jobs — **config only** (`app/config/`, `meta.json`). |
+| `gmic_job_ditto_sim/`, `gmic_job_ditto_mw_sim/`, `gmic_job_fedprox_sim/`, `gmic_job_fedbn_sim/` | NVFLARE **simulator** jobs, one per method — config only. |
+| `pool_report_job/` | Pools each site's per-round predictions into combined AUC/DeLong/operating-point statistics (keeps its own small executor). |
 | `ditto_sweep/` | Hyperparameter sweeps (Ditto λ; FedProx μ). |
 | `subgroup_fairness.py` | Per-race/ethnicity fairness for one site's deployed model. |
 | `run_all_subgroups.py` | Runs `subgroup_fairness.py` across every method and builds a combined table. |
@@ -60,8 +60,22 @@ cross-demographic equity:
 | `site_folders/` | Deployment templates: NVFLARE server/client Docker kits and a CSV→GMIC converter. |
 | `gmic-localhost.yml`, `master_template.yml` | NVFLARE provisioning: project spec + workspace template. |
 
-All six job folders carry a **byte-identical** copy of `bc_executor.py` (NVFLARE
-requires per-job custom code); change one and re-copy to keep them in sync.
+## Running a job
+
+The FL code is **not duplicated** into every job — it lives once in `custom/`.
+Each job folder holds only its config (which method + hyperparameters). Before
+running a job, copy the shared code into it:
+
+```bash
+cp -r custom gmic_job_ditto_sim/app/custom     # code into the job you want to run
+# then submit it (real deployment) or simulate it, e.g.:
+nvflare simulator gmic_job_ditto_sim -w /tmp/ws -n 3 -t 3
+```
+
+The per-job `app/custom/` copies are git-ignored, so the single source of truth
+stays `custom/`; edit code there and re-copy. Pick the job whose config matches
+the method you want — the four `*_sim` jobs are one per method for the local
+simulator; `gmic_job` / `gmic_job_hpu` are the real multi-site configs.
 
 ## Requirements & setup
 

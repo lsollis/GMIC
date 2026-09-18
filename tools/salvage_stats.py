@@ -6,7 +6,7 @@ federated salvage run: per-site rows are logged at each node and the POOLED row 
 server (see tools/salvage_runbook.md). Use this script when you can gather the prediction CSVs into
 one directory; use the in-run logs when you cannot (e.g. no file access to a node).
 
-Estimators live in gmic_job_hpu/app/custom/salvage_metrics.py (single source of truth, shared with
+Estimators live in custom/salvage_metrics.py (single source of truth, shared with
 the client executor and the server aggregator); this script only does CSV IO, grouping, and output.
 
 Input CSVs are as written by the executor's `_dump_predictions` (columns: site_id, round, method,
@@ -26,8 +26,8 @@ import glob
 import os
 import sys
 
-# Single source of truth for the estimators: the job's custom dir (sibling of tools/).
-_CUSTOM = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "gmic_job_hpu", "app", "custom"))
+# Single source of truth for the estimators: the shared repo-root custom/ (sibling of tools/).
+_CUSTOM = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "custom"))
 if _CUSTOM not in sys.path:
     sys.path.insert(0, _CUSTOM)
 from salvage_metrics import breast_aggregate, endpoint_metrics, format_endpoint, selftest_estimators  # noqa: E402

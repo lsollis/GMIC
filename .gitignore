@@ -23,6 +23,11 @@ simulator_cleaning_workspace/
 google_cloud_deployment/
 gmic-localhost-fedavg/
 
+# Shared FL code lives once at the top-level custom/ folder and is COPIED into a job's
+# app/custom/ before running it (see README "Running a job"). Keep those per-job copies
+# out of git so there is a single source of truth. (pool_report_job keeps its own custom.)
+gmic_job*/app/custom/
+
 # NVFLARE certificates and configs
 *.crt
 *.key
