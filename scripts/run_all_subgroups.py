@@ -11,7 +11,7 @@ method plus a combined table, and prints a group x method pivot of sens@spec (th
 headline). Pretrained baseline is fixed at round 0.
 
 Run from /workspace (the repo root inside the container):
-    python run_all_subgroups.py
+    python scripts/run_all_subgroups.py
 Edit METHODS below if a folder name differs, or pin a round by replacing None with an int.
 
 FedBN note: 'incoming_global' is the shared aggregate (FedBN's global part). FedBN's actual

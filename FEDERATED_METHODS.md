@@ -14,7 +14,7 @@ not code). `method ∈ {local, fedavg, fedprox, fedbn, ditto, ditto_modulewise}`
 - `app/custom/bc_executor.py` — method switch, pretrained init, GMIC loss, Ditto, dumps.
 - `app/custom/train/training_core.py` — tuple-aware `evaluate_model` (malignant head).
 - `app/config/config_fed_client.json` — `method` block.
-- `app/custom/test_fl_methods.py`, `test_executor_integration.py` — CPU tests.
+- `custom/tests/test_fl_methods.py`, `test_executor_integration.py` — CPU tests (`pytest custom/tests/`).
 
 ## Model / loss (verified against upstream nyukat/GMIC + the GMIC papers)
 - Param→group (module-wise Ditto): `global = ds_net + left_postprocess_net`,

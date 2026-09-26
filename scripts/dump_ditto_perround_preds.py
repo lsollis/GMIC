@@ -17,7 +17,7 @@ Self-check per site: the best round among the dumped val AUCs (and its value) mu
 and val AUC the executor recorded in <site>_best_val_overall_gmic_metrics.json -> prints OK / CHECK!.
 
 Run on the GPU box (needs torch + data + crop caches), from the repo root:
-    python dump_ditto_perround_preds.py
+    python scripts/dump_ditto_perround_preds.py
 Then point the notebook's Ditto entry at tag '<out_tag>' with trajectory=True.
 """
 import os, sys, re, json, csv, glob, inspect, logging
@@ -25,14 +25,14 @@ import numpy as np
 import torch
 from sklearn.metrics import roc_auc_score
 
-# Resolve job dirs RELATIVE TO THIS SCRIPT (it lives at the repo root, next to the job folders),
+# Resolve job dirs relative to the REPO ROOT (this script lives in scripts/, one level below),
 # so the bc_executor import works regardless of cwd / checkout root (e.g. /workspace vs a host path).
-HERE = os.path.dirname(os.path.abspath(__file__))
+HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # repo root (this script is in scripts/)
 CLIENTS = ["HIPIMR", "RSNA-AU", "RSNA-US"]
 # Selectable jobs: key -> (job_dir, output prediction tag). Choose on the command line:
-#   python dump_ditto_perround_preds.py                              # all jobs
-#   python dump_ditto_perround_preds.py mw                           # just module-wise
-#   CUDA_VISIBLE_DEVICES=3 python dump_ditto_perround_preds.py mw    # ...on physical GPU 3
+#   python scripts/dump_ditto_perround_preds.py                              # all jobs
+#   python scripts/dump_ditto_perround_preds.py mw                           # just module-wise
+#   CUDA_VISIBLE_DEVICES=3 python scripts/dump_ditto_perround_preds.py mw    # ...on physical GPU 3
 # Distinct out dirs per job, so two invocations can run concurrently on different GPUs.
 ALL_JOBS = {
     "ditto": (os.path.join(HERE, "ditto"),    "ditto_perround"),

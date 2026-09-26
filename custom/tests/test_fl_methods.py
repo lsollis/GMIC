@@ -1,7 +1,7 @@
 # ============================================================================
 # test_fl_methods.py - CPU synthetic tests for the federated-method primitives
 # ----------------------------------------------------------------------------
-# Run from custom/:   python test_fl_methods.py
+# Run from custom/tests/:   python test_fl_methods.py
 # (or with pytest:                 pytest -q test_fl_methods.py)
 #
 # Covers brief tests:
@@ -24,7 +24,8 @@ import torch
 import torch.nn as nn
 
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, THIS_DIR)
+sys.path.insert(0, THIS_DIR)                     # this tests/ dir (sibling test imports)
+sys.path.insert(0, os.path.dirname(THIS_DIR))    # custom/ (bc_executor, fl_utils, model.*, ...)
 
 from model.gmic import GMIC  # noqa: E402
 import fl_utils as F  # noqa: E402

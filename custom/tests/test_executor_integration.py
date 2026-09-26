@@ -3,7 +3,7 @@
 # ----------------------------------------------------------------------------
 # Drives GMICFederatedExecutor.execute() with a tiny SYNTHETIC data loader and a
 # bare FLContext, on CPU, for every `method`. Requires nvflare + torch.
-# Run from custom/:   python test_executor_integration.py
+# Run from custom/tests/:   python test_executor_integration.py
 #
 # Covers brief tests:
 #   4. CPU smoke per method (one round completes, returns a valid Shareable)
@@ -42,7 +42,8 @@ import torch
 import torch.nn as nn
 
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, THIS_DIR)
+sys.path.insert(0, THIS_DIR)                     # this tests/ dir (sibling test imports)
+sys.path.insert(0, os.path.dirname(THIS_DIR))    # custom/ (bc_executor, fl_utils, model.*, ...)
 
 logging.basicConfig(level=logging.ERROR)  # keep executor's info logs quiet
 

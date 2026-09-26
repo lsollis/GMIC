@@ -53,9 +53,8 @@ cross-demographic equity:
 | `centralized/`, `local/` | Single-node (1-client) baselines — config only. `centralized` = all sites' data pooled in one CSV; `local` = one site's CSV. |
 | `pool_report_job/` | Pools each site's per-round predictions into combined AUC/DeLong/operating-point statistics (keeps its own small executor). |
 | `ditto_sweep/` | Hyperparameter sweeps (Ditto λ; FedProx μ). |
-| `subgroup_fairness.py` | Per-race/ethnicity fairness for one site's deployed model. |
-| `run_all_subgroups.py` | Runs `subgroup_fairness.py` across every method and builds a combined table. |
-| `dump_ditto_perround_preds.py` | Dumps per-round predictions for personalized (Ditto) runs. |
+| `scripts/` | Analysis/utility scripts (run from the repo root): `subgroup_fairness.py` (per-race/ethnicity fairness for one site), `run_all_subgroups.py` (that across every method → combined table), `dump_ditto_perround_preds.py` (per-round predictions for Ditto runs). |
+| `custom/tests/` | Unit/integration tests for the FL code (`pytest custom/tests/`). |
 | `tools/` | Operational helpers (salvage/resume runbooks). |
 | `site_folders/` | Deployment templates: NVFLARE server/client Docker kits and a CSV→GMIC converter. |
 | `gmic-localhost.yml`, `master_template.yml` | NVFLARE provisioning: project spec + workspace template. |
@@ -191,15 +190,15 @@ batch); only BatchNorm statistics are computed on the smaller chunk.
   site-specific schema:
 
   ```bash
-  python subgroup_fairness.py \
+  python scripts/subgroup_fairness.py \
       --pred  <SITE>_predictions_<method>_round<N>_test.csv \
       --val   <SITE>_predictions_<method>_round<N>_val.csv \
       --meta  <site_registry>.csv \
       --site  <SITE> --eth-col <race_column> --eth-map <map.json>
   ```
 
-  `run_all_subgroups.py` runs this across every method (auto-selecting each
-  method's best-validation round) and writes a combined table plus a
+  `scripts/run_all_subgroups.py` runs this across every method (auto-selecting
+  each method's best-validation round) and writes a combined table plus a
   group × method summary.
 
 ## Citation

@@ -1,6 +1,6 @@
 # ============================================================================
 # test_center_neutralized.py - Stage-2 center neutralization (C')
-# Run from custom/:  python test_center_neutralized.py
+# Run from custom/tests/:  python test_center_neutralized.py
 #
 # The optimal-center search is neutralized to image-center because it is INERT in this
 # fork's resize+pad pipeline. This test proves the invariant that justifies that:
@@ -14,7 +14,8 @@ import sys
 import numpy as np
 
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, THIS_DIR)
+sys.path.insert(0, THIS_DIR)                     # this tests/ dir (sibling test imports)
+sys.path.insert(0, os.path.dirname(THIS_DIR))    # custom/ (bc_executor, fl_utils, model.*, ...)
 
 import data_loader.augmentations as aug  # noqa: E402
 

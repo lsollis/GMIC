@@ -16,7 +16,7 @@
 #   4. A missing personal checkpoint RAISES instead of cold-starting v.
 #
 # Reuses the synthetic-loader harness from test_executor_integration.
-# Run from custom/:   python -m pytest test_resume_ditto.py -q
+# Run from custom/tests/:   python -m pytest test_resume_ditto.py -q
 # ============================================================================
 import os
 import copy

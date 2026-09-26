@@ -12,7 +12,7 @@
 #
 # The heartbeat is log-only by design: a slow-but-healthy site must never be killed by a watchdog.
 #
-# Run from custom/:   python -m pytest test_progress_logging.py -q
+# Run from custom/tests/:   python -m pytest test_progress_logging.py -q
 # ============================================================================
 import copy
 import logging

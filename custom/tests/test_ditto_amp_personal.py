@@ -9,7 +9,7 @@
 # (scaler branch, unscale-before-clip ordering, the non-finite guard, and v still learning).
 # The memory claim itself is not testable here; it is pinned by the config + docstring.
 #
-# Run from custom/:   python -m pytest test_ditto_amp_personal.py -q
+# Run from custom/tests/:   python -m pytest test_ditto_amp_personal.py -q
 # ============================================================================
 import contextlib
 import copy

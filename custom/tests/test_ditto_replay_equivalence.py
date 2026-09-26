@@ -1,6 +1,6 @@
 # ============================================================================
 # test_ditto_replay_equivalence.py - Ditto consolidation: interleaved == replay
-# Run from custom/:  python test_ditto_replay_equivalence.py
+# Run from custom/tests/:  python test_ditto_replay_equivalence.py
 #
 # The KEY correctness proof for the FedAvg+Ditto consolidation (Phase 3.1):
 #   replaying a CACHED per-round global trajectory to train the personalized model v must
@@ -25,7 +25,8 @@ import torch
 import torch.nn as nn
 
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, THIS_DIR)
+sys.path.insert(0, THIS_DIR)                     # this tests/ dir (sibling test imports)
+sys.path.insert(0, os.path.dirname(THIS_DIR))    # custom/ (bc_executor, fl_utils, model.*, ...)
 
 import fl_utils as F  # noqa: E402
 

@@ -6,7 +6,7 @@
 # accumulating gradients so the optimizer step equals a single full-batch step -- only BatchNorm
 # sees the smaller chunk. The correctness claim is exactly that gradient-equality, pinned here.
 #
-# Run from custom/:   python -m pytest test_personal_microbatch.py -q
+# Run from custom/tests/:   python -m pytest test_personal_microbatch.py -q
 # ============================================================================
 import copy
 import math
