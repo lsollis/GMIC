@@ -903,10 +903,6 @@ class GMICFederatedExecutor(Executor):
                     except Exception as e:
                         self.log_warning(fl_ctx, f"[incoming-global] eval failed for round {logical_round}: {e}")
 
-            # === NUCLEAR OPTION: FORCE RANDOM INIT FOR THIS RUN ===
-            # self._reset_model_weights()
-            # self.log_info(fl_ctx, "[RANDOM_INIT] Forced re-randomization of all model weights at start of execute().")
-
             # --- TRAIN (with early stopping) ---
             self.log_info(fl_ctx, "Phase 1: Training (early stopping enabled)...")
             train_metrics = self._local_train(fl_ctx, abort_signal, shareable)
@@ -2438,22 +2434,3 @@ class GMICFederatedExecutor(Executor):
 
         except Exception as e:
             self._logger.warning("[EXEC][WARN] Could not recover best metrics: %s", e, exc_info=True)
-
-
-"""
-    def _reset_model_weights(self):
-
-        # Prefer underlying (for DataParallel), fall back to self.model
-        model = getattr(self, "_underlying", None) or getattr(self, "model", None)
-        if model is None:
-            # initialize() hasn't built the model yet; nothing to reset
-            self._logger.warning("[RANDOM_INIT] _reset_model_weights called before model was built; skipping.")
-            return
-
-        def _init(m):
-            if hasattr(m, "reset_parameters"):
-                m.reset_parameters()
-
-        model.apply(_init)
-        self._logger.info("[RANDOM_INIT] All modules with reset_parameters() have been reinitialized.")
-"""
