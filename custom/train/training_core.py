@@ -9,25 +9,20 @@ Safe to import: no argparse side effects or heavy I/O at import time.
 from __future__ import annotations
 
 import os
-import copy
 import random
-import time
-import uuid
 import logging
-from typing import Dict, Any, Iterable
+from typing import Iterable
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 import numpy as np
-from sklearn.metrics import roc_auc_score, accuracy_score
 
 from model.gmic import GMIC
 
 logger = logging.getLogger(__name__)
 
-from model import gmic
 from constants.constants import PERCENT_T_DICT
 
 __all__ = [

@@ -21,7 +21,6 @@ import sys
 import copy
 
 import torch
-import torch.nn as nn
 
 THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, THIS_DIR)                     # this tests/ dir (sibling test imports)
@@ -290,7 +289,6 @@ def test_augmentation_safety():
 def test_breast_aggregate():
     """breast_aggregate: per-image -> breast (exam_id, laterality); pred=mean(views), label=max.
     Don't assume 2 views; parse laterality robustly; fail loud on unparseable view."""
-    import numpy as np
     # exam 0: L breast 2 views (CC .8, MLO .6 -> mean .7), R breast 1 view (.2)
     # exam 1: L breast 2 views (.9,.9 -> .9)
     exam = [0, 0, 0, 1, 1]
@@ -313,13 +311,12 @@ def test_breast_aggregate():
     except ValueError:
         raised = True
     assert raised, "unparseable view must raise (no silent drop)"
-    print(f"[breast] OK 5 images -> 3 breasts, mean-of-views pred, max label, robust parse")
+    print("[breast] OK 5 images -> 3 breasts, mean-of-views pred, max label, robust parse")
 
 
 def test_optimizer_selection():
     """configure_optimizers honors optimizer_name: default/adam -> Adam, adamw -> AdamW.
     Both keep per-group LRs (backbone lr_backbone, heads lr_heads) and apply weight_decay."""
-    import torch.optim as optim
     from train.training_core import configure_optimizers
     class OA:
         lr_heads = 3e-5; lr_backbone = 1e-5; weight_decay = 1e-2; patience = 4

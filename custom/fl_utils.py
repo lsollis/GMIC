@@ -250,7 +250,6 @@ def tolerant_load_pretrained(
         sd = sd["model"]  # some releases wrap as {"model": state_dict}
 
     own_keys = set(model.state_dict().keys())
-    ckpt_keys = set(sd.keys())
 
     try:
         model.load_state_dict(sd, strict=True)

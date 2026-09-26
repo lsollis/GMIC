@@ -19,8 +19,6 @@ import logging
 import tempfile
 import time
 
-import pytest
-import torch
 
 from test_executor_integration import (  # noqa: E402  (installs the `resource` stub on import)
     GMIC_PARAMS, make_executor, run_round,

@@ -20,7 +20,6 @@
 """
 Defines functions used in search_windows_and_centers.py
 """
-import math
 import numpy as np
 import pandas as pd
 

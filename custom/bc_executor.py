@@ -27,34 +27,29 @@ import threading
 import contextlib
 
 import torch
-import torch.nn as nn
 import torch.optim as optim
 import numpy as np
 from sklearn.metrics import roc_auc_score, accuracy_score
 
 from nvflare.app_common.utils.fl_model_utils import FLModel, FLModelUtils, ParamsType
-from nvflare.apis.dxo import DXO, DataKind, MetaKey, from_shareable
+from nvflare.apis.dxo import DXO, DataKind, MetaKey
 from nvflare.apis.event_type import EventType
 from nvflare.apis.executor import Executor
-from nvflare.apis.fl_constant import ReservedKey, ReturnCode
+from nvflare.apis.fl_constant import ReturnCode
 from nvflare.apis.fl_context import FLContext
 from nvflare.apis.shareable import Shareable, make_reply
 from nvflare.apis.signal import Signal
-from nvflare.app_common.abstract.model import make_model_learnable, model_learnable_to_dxo
 from nvflare.app_common.app_constant import AppConstants
-from nvflare.app_opt.pt.model_persistence_format_manager import PTModelPersistenceFormatManager
 
 from train.training_core import first_batch_input_device_str, summarize_parameter_devices
 from data_loader.data_loader import GMICDataLoader  # This should be the final data loader class
 from constants.constants import PERCENT_T_DICT
 from train.training_core import (
     build_gmic_from_args,
-    load_pretrained_if_requested,
     configure_optimizers,
     apply_freezing_plan,
     evaluate_model,
     set_seed,
-    EarlyStopper,
 )
 from fl_utils import (
     bn_state_keys,
