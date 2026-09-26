@@ -38,9 +38,7 @@ RUN python -m pip install --no-cache-dir \
       matplotlib \
       jupyter \
       "nvflare==2.6.2" \
-      scikit-learn \
-      tensorboard \
-      tensorboardX
+      scikit-learn
 
 # Optional: build-time sanity check so bad combos fail fast
 RUN python - <<'PY'

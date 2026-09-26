@@ -54,9 +54,7 @@ RUN python -m pip install --no-cache-dir \
       matplotlib \
       jupyter \
       "nvflare==2.6.2" \
-      scikit-learn \
-      tensorboard \
-      tensorboardX
+      scikit-learn
 
 # --------------------------------------------------------------------
 # 4) Sanity check
