@@ -138,7 +138,6 @@ def render_job(label, arg_overrides, rounds, base_job, work_root, output_base, c
     args.update(arg_overrides)
     run_root = f"{output_base}/{label}"
     args["output_dir"] = f"{run_root}/{{site}}"
-    args["tb_log_dir"] = f"{run_root}/tb/{{site}}"
     args["log_file"] = f"{run_root}/{{site}}/executor.log"
     _dump_json(os.path.join(cfg_dir, "config_fed_client.json"), client_cfg)
 

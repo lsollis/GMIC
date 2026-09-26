@@ -46,8 +46,6 @@
           "local_epochs": null,
           "train_log_batch_interval": 1,
           "log_lr_each_epoch": true,
-          "tb_log_dir": "/workspace/results/local/tb/{site}",
-          "disable_tensorboard": false,
           "per_file_logging": true,
           "tolerant_missing_metadata": false,
           "debug_devices": false,

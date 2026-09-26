@@ -44,7 +44,7 @@ from nvflare.app_common.abstract.model import make_model_learnable, model_learna
 from nvflare.app_common.app_constant import AppConstants
 from nvflare.app_opt.pt.model_persistence_format_manager import PTModelPersistenceFormatManager
 
-from train.training_core import create_tb_writer, first_batch_input_device_str, summarize_parameter_devices
+from train.training_core import first_batch_input_device_str, summarize_parameter_devices
 from data_loader.data_loader import GMICDataLoader  # This should be the final data loader class
 from constants.constants import PERCENT_T_DICT
 from train.training_core import (
@@ -166,7 +166,7 @@ class GMICFederatedExecutor(Executor):
             # Optional pretrained / checkpoint
             pretrained_model_index: str = "ensemble",
             load_checkpoint: str = "",
-            # Logging / TensorBoard
+            # Logging
             train_log_batch_interval: int = 5,
             # ---------------------------------------------------------------------------------
             # CONSTRAINED-GPU / DIAGNOSTIC TOGGLES (all optional; every default below reproduces
@@ -187,8 +187,6 @@ class GMICFederatedExecutor(Executor):
             # CPU/GPU overlap (negligible here: the pass is compute-bound) and is off by default.
             stage_sync: bool = False,
             log_lr_each_epoch: bool = False,
-            tb_log_dir: str | None = None,
-            disable_tensorboard: bool = False,
             per_file_logging: bool = False,
             tolerant_missing_metadata: bool = False,
             gpus: str = "",
@@ -322,8 +320,6 @@ class GMICFederatedExecutor(Executor):
             self.heartbeat_interval_s = int(heartbeat_interval_s or 0)
             self.stage_sync = bool(stage_sync)
             self.log_lr_each_epoch = log_lr_each_epoch
-            self.tb_log_dir = tb_log_dir
-            self.disable_tensorboard = disable_tensorboard
             self.per_file_logging = per_file_logging
             self.tolerant_missing_metadata = tolerant_missing_metadata
             self.gpus = gpus
@@ -506,7 +502,6 @@ class GMICFederatedExecutor(Executor):
         self.output_dir = _sub_site(self.output_dir)
         self.results_dir = _sub_site(self.results_dir)
         self.preprocess_cache_dir = _sub_site(self.preprocess_cache_dir)
-        self.tb_log_dir = _sub_site(self.tb_log_dir)
         self.log_file = _sub_site(self.log_file)
         if ident and ("{site}" in str(getattr(self, "output_dir", "")) or self.preprocess_cache_dir_map):
             self._logger.info(
@@ -766,17 +761,7 @@ class GMICFederatedExecutor(Executor):
         except Exception as e:
             self._logger.warning("[gpu-diag] diagnostics failed (non-fatal): %s", e)
 
-        # 8. TensorBoard
-        self.tb_writer = None
-        if self.tb_log_dir and not self.disable_tensorboard:
-            try:
-                self.tb_writer = create_tb_writer(self.tb_log_dir, enable=True)
-                if self.tb_writer:
-                    self._logger.info("[EXEC][tensorboard] logging to %s", self.tb_log_dir)
-            except Exception as e:
-                self._logger.warning("[EXEC][tensorboard][WARN] %s", e, exc_info=True)
-
-        # 9. Multi-GPU
+        # 8. Multi-GPU
         gpu_ids = []
         if self.gpus:
             try:

@@ -14,7 +14,7 @@ import random
 import time
 import uuid
 import logging
-from typing import Dict, Any, Iterable, Optional
+from typing import Dict, Any, Iterable
 
 import torch
 import torch.nn as nn
@@ -26,32 +26,6 @@ from sklearn.metrics import roc_auc_score, accuracy_score
 from model.gmic import GMIC
 
 logger = logging.getLogger(__name__)
-
-try:  # prefer torch built-in
-    from torch.utils.tensorboard import SummaryWriter  # type: ignore
-except Exception:  # fallback
-    try:
-        from tensorboardX import SummaryWriter  # type: ignore
-    except Exception:  # no tensorboard available; define stub
-        class SummaryWriter:  # type: ignore
-            def __init__(self, *a, **k):
-                # IMPORTANT: do not print; stdout can be broken in NVFLARE container workers.
-                try:
-                    logger.warning("[tensorboard] SummaryWriter unavailable; proceeding without TB logs")
-                except Exception:
-                    pass
-
-            def add_scalar(self, *a, **k):
-                pass
-
-            def add_histogram(self, *a, **k):
-                pass
-
-            def flush(self):
-                pass
-
-            def close(self):
-                pass
 
 from model import gmic
 from constants.constants import PERCENT_T_DICT
@@ -66,9 +40,6 @@ __all__ = [
     "set_seed",
     "set_requires_grad",
     "EarlyStopper",
-    "_train_single_run",
-    "_sample_hparams",
-    "create_tb_writer",
     "summarize_parameter_devices",
     "first_batch_input_device_str",
 ]
@@ -398,164 +369,6 @@ class EarlyStopper:
 
     def should_stop(self):
         return self.count >= self.patience
-
-
-def _train_single_run(base_args, data_loader, log_fn=None, tb_writer=None, trial_index: int | None = None) -> dict:
-    """Short training loop for random search trials.
-
-    Parameters:
-        base_args: namespace of hyperparameters for this trial
-        data_loader: shared GMICDataLoader instance (train/val splits reused)
-        log_fn: optional logging function accepting a string
-        tb_writer: optional SummaryWriter for per-epoch metrics
-        trial_index: zero-based index of this trial for TB tagging (if provided)
-    Returns:
-        dict with keys {val_auc, best_path, trial_args}
-    """
-    model = build_gmic_from_args(base_args)
-    model.to(base_args.device)
-    load_pretrained_if_requested(model, base_args, log_fn=log_fn)
-    apply_freezing_plan(model, base_args)
-    criterion = nn.CrossEntropyLoss()
-    optimizer, scheduler, early_stopper = configure_optimizers(model, base_args)
-    best_val_auc = -float("inf")
-    model.train()
-    for epoch in range(base_args.search_max_epochs):
-        total_loss, num_batches = 0.0, 0
-        all_predictions, all_targets = [], []
-        epoch_start = time.time()
-        for batch_idx, (inputs, targets, meta) in enumerate(data_loader.get_batch_iterator('train')):
-            inputs = inputs.to(base_args.device)
-            targets = targets.to(base_args.device)
-            optimizer.zero_grad()
-            out = model(inputs)
-            logits = out[0] if isinstance(out, (tuple, list)) else out
-            loss = criterion(logits, targets)
-            loss.backward()
-            optimizer.step()
-            if batch_idx == 0 and log_fn:
-                lrs = [pg['lr'] for pg in optimizer.param_groups]
-                log_fn("[search] epoch {} start LRs {}".format(epoch + 1, ",".join(f"{lr:.2e}" for lr in lrs)))
-            if getattr(base_args, 'search_log_batch_interval', 0) and (batch_idx % base_args.search_log_batch_interval == 0) and log_fn:
-                log_fn(f"[search] epoch {epoch + 1} batch {batch_idx} loss {loss.item():.4f}")
-            total_loss += loss.item()
-            num_batches += 1
-            # malignant head probability (sigmoid of the fusion logit), consistent with
-            # the eval/dump path -- no softmax anywhere in the analysis tree.
-            pos_probs = torch.sigmoid(logits[:, 1]).detach().cpu().numpy().reshape(-1)
-            all_predictions.extend(pos_probs)
-            all_targets.extend(targets.detach().cpu().numpy().reshape(-1))
-        train_auc = 0.0
-        if all_targets and len(set(all_targets)) > 1:
-            try:
-                train_auc = roc_auc_score(all_targets, all_predictions)
-            except Exception:
-                train_auc = 0.0
-        avg_loss = total_loss / max(num_batches, 1)
-        if log_fn:
-            log_fn(
-                f"[search] epoch {epoch + 1} train_loss {avg_loss:.4f} train_auc {train_auc:.4f} "
-                f"time {(time.time() - epoch_start):.1f}s"
-            )
-
-        val_auc = 0.0
-        val_loss = 0.0
-        val_acc = 0.0
-        if len(data_loader.get_data_for_split('val')) > 0:
-            val_metrics = evaluate_model(model, data_loader, criterion, base_args.device, split='val')
-            val_auc = val_metrics['auc']
-            val_loss = val_metrics['loss']
-            val_acc = val_metrics['accuracy']
-            scheduler.step(val_auc)
-
-            # Log current learning rates safely (no print)
-            if log_fn:
-                current_lrs = [param_group['lr'] for param_group in optimizer.param_groups]
-                log_fn(f"[search] epoch {epoch + 1} current_lrs " + ",".join(f"{lr:.2e}" for lr in current_lrs))
-
-            if log_fn:
-                log_fn(
-                    f"[search] epoch {epoch + 1} val_auc {val_auc:.4f} val_loss {val_loss:.4f} "
-                    f"val_acc {val_acc:.2f}%"
-                )
-            if early_stopper.step(val_auc, model):
-                best_val_auc = val_auc
-            if early_stopper.should_stop():
-                break
-            model.train()
-
-        # TensorBoard per-epoch logging
-        if tb_writer is not None:
-            # Use 1-based epoch for step; tag by trial
-            step = epoch + 1
-            trial_tag = f"trial_{trial_index + 1}" if trial_index is not None else "trial"
-            base_tag = f"search/{trial_tag}"
-            tb_writer.add_scalar(f"{base_tag}/epoch_train_loss", avg_loss, step)
-            tb_writer.add_scalar(f"{base_tag}/epoch_train_auc", train_auc, step)
-            if len(data_loader.get_data_for_split('val')) > 0:
-                tb_writer.add_scalar(f"{base_tag}/epoch_val_auc", val_auc, step)
-                tb_writer.add_scalar(f"{base_tag}/epoch_val_loss", val_loss, step)
-                tb_writer.add_scalar(f"{base_tag}/epoch_val_acc", val_acc, step)
-            # Log learning rates
-            for i, pg in enumerate(optimizer.param_groups):
-                tb_writer.add_scalar(f"{base_tag}/lr_group_{i}", pg['lr'], step)
-            tb_writer.flush()
-
-    uid = uuid.uuid4().hex[:8]
-    best_path = os.path.join(base_args.out_dir, f"gmic_best_search_{uid}.pth")
-    if early_stopper.best_state is not None:
-        model.load_state_dict(early_stopper.best_state)
-        torch.save(model.state_dict(), best_path)
-    return {"val_auc": best_val_auc, "best_path": best_path, "trial_args": base_args}
-
-
-def _sample_hparams(base_args):
-    args = copy.deepcopy(base_args)
-
-    def jitter_lr(lr, low=0.3, high=3.0):
-        return float(lr * (10 ** random.uniform(np.log10(low), np.log10(high))))
-
-    args.lr_backbone = jitter_lr(base_args.lr_backbone)
-    args.lr_heads = jitter_lr(base_args.lr_heads)
-    wd_low, wd_high = 1e-6, 3e-4
-    args.weight_decay = float(10 ** random.uniform(np.log10(wd_low), np.log10(wd_high)))
-    pt_keys = list(PERCENT_T_DICT.keys())
-    args.percent_t = random.choice(pt_keys)
-    low_K = max(1, int(0.75 * base_args.K))
-    high_K = int(1.25 * base_args.K)
-    args.K = random.randint(low_K, max(low_K, high_K))
-    args.post_dim = int(base_args.post_dim * random.choice([1.0, 1.5]))
-    policies = [
-        dict(freeze_all_backbones=True, unfreeze_global_last=False, unfreeze_local_last=False),
-        dict(freeze_all_backbones=False, unfreeze_global_last=True, unfreeze_local_last=False),
-        dict(freeze_all_backbones=False, unfreeze_global_last=False, unfreeze_local_last=True),
-        dict(freeze_all_backbones=False, unfreeze_global_last=True, unfreeze_local_last=True),
-    ]
-    pol = random.choice(policies)
-    args.freeze_all_backbones = pol["freeze_all_backbones"]
-    args.unfreeze_global_last = pol["unfreeze_global_last"]
-    args.unfreeze_local_last = pol["unfreeze_local_last"]
-    args.patience = max(2, int(base_args.patience + random.choice([-1, 0, 1])))
-    return args
-
-
-def create_tb_writer(log_dir: str | None, enable: bool = True) -> Optional[SummaryWriter]:
-    """Create a SummaryWriter if enable and log_dir provided; else return None.
-
-    Ensures directory exists and does not raise if tensorboard libs missing.
-    Avoids print(); uses logger.
-    """
-    if not enable or not log_dir:
-        return None
-    os.makedirs(log_dir, exist_ok=True)
-    try:
-        return SummaryWriter(log_dir=log_dir)
-    except Exception as e:
-        try:
-            logger.warning(f"[tensorboard] failed to create writer: {e}")
-        except Exception:
-            pass
-        return None
 
 
 #############################

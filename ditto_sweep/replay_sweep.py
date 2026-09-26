@@ -137,10 +137,8 @@ def build_site(base_job, args, site, device):
     a = dict(args)
     a["device"] = device
     a["gpus"] = device.split(":")[-1] if ":" in device else "0"
-    a["disable_tensorboard"] = True
     # scratch output paths so we never touch the real run dirs (replay writes nothing here anyway)
     a["output_dir"] = os.path.join(_SCRATCH, "{site}")
-    a["tb_log_dir"] = os.path.join(_SCRATCH, "tb", "{site}")
     a["log_file"] = os.path.join(_SCRATCH, "{site}", "replay.log")
     ex = GMICFederatedExecutor(**a)
     ex._identity = site
