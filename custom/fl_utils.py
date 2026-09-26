@@ -43,7 +43,6 @@ __all__ = [
     "gmic_outputs",
     "malignant_score",
     "gmic_malignant_loss",
-    "gmic_focal_loss",
     "classification_metrics",
     "site_selection_metrics",
     "VALID_SELECTION_METRICS",
@@ -387,45 +386,6 @@ def gmic_malignant_loss(outputs, targets, lambda_l1: float = 1e-5,
         loss = loss + F.binary_cross_entropy(y_global[:, m].float().clamp(eps, 1 - eps), t, weight=w)
     if y_local is not None:
         loss = loss + F.binary_cross_entropy(y_local[:, m].float().clamp(eps, 1 - eps), t, weight=w)
-    if saliency is not None and lambda_l1:
-        sal_m = saliency[:, m].float()
-        l1 = sal_m.abs().sum(dim=tuple(range(1, sal_m.dim()))).mean()
-        loss = loss + float(lambda_l1) * l1
-    return loss
-
-
-def _focal_bce(logits, targets, gamma, alpha, from_logits=True, eps=1e-6):
-    """Binary focal loss on a single logit/prob column. alpha weights the positive class.
-
-    FL = -alpha * (1-p)^gamma * y*log(p) - (1-alpha) * p^gamma * (1-y)*log(1-p)
-    """
-    p = torch.sigmoid(logits) if from_logits else logits.clamp(eps, 1 - eps)
-    p = p.clamp(eps, 1 - eps)
-    y = targets
-    w_pos = alpha * (1 - p) ** gamma
-    w_neg = (1 - alpha) * p ** gamma
-    loss = -(w_pos * y * torch.log(p) + w_neg * (1 - y) * torch.log(1 - p))
-    return loss.mean()
-
-
-def gmic_focal_loss(outputs, targets, lambda_l1: float = 1e-5,
-                    gamma: float = 2.0, alpha: float = 0.25, malignant_index: int = 1):
-    """GMIC deep-supervised loss with FOCAL BCE on each head (malignant channel only).
-
-    Same three-head + L1 structure as gmic_malignant_loss, but each BCE term is replaced
-    by binary focal loss (down-weights easy negatives via (p)^gamma; alpha weights positives).
-    An alternative imbalance lever to pos_weight; do not combine with a large pos_weight.
-    """
-    fusion_logits, y_global, y_local, saliency = gmic_outputs(outputs)
-    m = malignant_index
-    fusion_logits = fusion_logits.float()
-    t = targets.to(dtype=fusion_logits.dtype).view(-1)
-
-    loss = _focal_bce(fusion_logits[:, m], t, gamma, alpha, from_logits=True)
-    if y_global is not None:
-        loss = loss + _focal_bce(y_global[:, m].float(), t, gamma, alpha, from_logits=False)
-    if y_local is not None:
-        loss = loss + _focal_bce(y_local[:, m].float(), t, gamma, alpha, from_logits=False)
     if saliency is not None and lambda_l1:
         sal_m = saliency[:, m].float()
         l1 = sal_m.abs().sum(dim=tuple(range(1, sal_m.dim()))).mean()

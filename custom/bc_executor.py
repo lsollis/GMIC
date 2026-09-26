@@ -63,7 +63,6 @@ from fl_utils import (
     clone_detached_state,
     tolerant_load_pretrained,
     gmic_malignant_loss,
-    gmic_focal_loss,
     malignant_score,
     gmic_outputs,
 )
@@ -106,29 +105,10 @@ def _git_hash():
 # Allowed federated methods (selected via the client job config "method" arg).
 VALID_METHODS = ("local", "fedavg", "fedprox", "fedbn", "ditto", "ditto_modulewise")
 
-# Allowed loss values. "gmic"/"gmic_bce" -> native GMIC deep-supervised 3-head malignant
-# BCE + L1 (criterion unused; computed in _compute_task_loss). "focal" -> same 3-head
-# structure with focal BCE (criterion unused). "cross_entropy"/"ce" -> legacy CrossEntropyLoss.
-# Plain "bce" is NOT valid.
-VALID_LOSSES = ("gmic", "gmic_bce", "focal", "cross_entropy", "ce")
-
-
-def resolve_criterion(loss_name: str):
-    """Map a config `loss` string to a criterion (or None for the GMIC/focal paths).
-
-    Returns None for gmic/gmic_bce/focal (loss computed in _compute_task_loss), an
-    nn.CrossEntropyLoss for cross_entropy/ce, and raises ValueError on anything else
-    so an unknown loss fails loudly instead of silently routing to a default."""
-    name = (loss_name or "gmic").lower()
-    if name in ("gmic", "gmic_bce", "focal"):
-        return None
-    if name in ("cross_entropy", "ce"):
-        return nn.CrossEntropyLoss()
-    raise ValueError(
-        f"Unknown loss '{name}'. Valid: {VALID_LOSSES} "
-        f"('gmic'/'gmic_bce' = native GMIC malignant loss; 'focal' = focal BCE variant; "
-        f"'cross_entropy'/'ce' = legacy). Plain 'bce' is not supported."
-    )
+# The task loss is the native GMIC deep-supervised 3-head malignant BCE + L1
+# (BCEWithLogits(fusion) + BCE(global) + BCE(local) + lambda_l1*L1), computed in
+# _compute_task_loss. "gmic" is the only supported value.
+VALID_LOSSES = ("gmic",)
 
 
 class GMICFederatedExecutor(Executor):
@@ -247,7 +227,7 @@ class GMICFederatedExecutor(Executor):
             test_task_name: str = "test",
             exclude_vars=None,
             gmic_parameters: dict | None = None,
-            loss: str = "cross_entropy",
+            loss: str = "gmic",
             optimizer: dict | None = None,
             task_names: dict | None = None,
             # ---- Federated method selection (single switch across 6 regimes) ----
@@ -263,8 +243,6 @@ class GMICFederatedExecutor(Executor):
             pos_weight: float = 3.0,              # malignant-class weight for GMIC BCE
             # ---- Imbalance / overfitting levers (all default to current/off behavior) ----
             use_balanced_sampler: bool = False,   # view-level class-balanced batch sampling
-            focal_gamma: float = 2.0,             # used when loss=="focal"
-            focal_alpha: float = 0.25,            # used when loss=="focal"
             lr_scheduler: str | None = None,      # None/"plateau"(default)/"cosine"/"none"
             scheduler_patience: int = 2,          # ReduceLROnPlateau patience
             min_lr: float = 0.0,                  # scheduler floor
@@ -393,7 +371,11 @@ class GMICFederatedExecutor(Executor):
             # incoming_global_history; saved into final_results.json for the same per-round table.
             self.personal_perround_history = []
             self.gmic_parameters_cfg = gmic_parameters or {}
-            self.loss_name = loss
+            self.loss_name = (loss or "gmic").lower()
+            if self.loss_name not in VALID_LOSSES:
+                raise ValueError(
+                    f"Unknown loss '{loss}'. Only {VALID_LOSSES} is supported "
+                    f"(the native GMIC deep-supervised malignant BCE + L1 loss).")
             self.optimizer_cfg = optimizer or {"name": "adam", "weight_decay": self.weight_decay}
             self.task_names = task_names or {}
             self.pre_train_task_name = self.task_names.get("pre_train", self.pre_train_task_name)
@@ -425,8 +407,6 @@ class GMICFederatedExecutor(Executor):
             self.pos_weight = float(pos_weight)
             # ---- Imbalance / overfitting levers ----
             self.use_balanced_sampler = bool(use_balanced_sampler)
-            self.focal_gamma = float(focal_gamma)
-            self.focal_alpha = float(focal_alpha)
             self.lr_scheduler_name = lr_scheduler
             self.scheduler_patience = int(scheduler_patience)
             self.min_lr = float(min_lr)
@@ -755,10 +735,8 @@ class GMICFederatedExecutor(Executor):
         fa.unfreeze_local_last = self.unfreeze_local_last
         apply_freezing_plan(self.model, fa)
 
-        # 7. Loss & optimizer. resolve_criterion validates the loss name and fails loudly on
-        # an unknown value (same pattern as the `method` validation). Returns None for the GMIC
-        # path (loss computed in _compute_task_loss); criterion is unused there.
-        self.criterion = resolve_criterion(getattr(self, "loss_name", "gmic"))
+        # 7. Optimizer. The GMIC task loss is computed in _compute_task_loss, so there is no
+        # nn criterion object; self.criterion stays None (evaluate_model accepts None).
 
         class _OptArgs: pass
         oa = _OptArgs()
@@ -865,7 +843,6 @@ class GMICFederatedExecutor(Executor):
                 f"use_augmentation={self.use_augmentation} "
                 f"seed={self.random_seed} git={_git_hash()}"
                 + (f" aug={self.data_loader.aug_cfg}" if (self.use_augmentation and getattr(self, 'data_loader', None) is not None) else "")
-                + (f" focal(gamma={self.focal_gamma},alpha={self.focal_alpha})" if self.loss_name == "focal" else "")
             )
 
             # --- receive global model (support both FLModel and legacy raw weights) ---
@@ -1448,25 +1425,12 @@ class GMICFederatedExecutor(Executor):
 
 
     def _compute_task_loss(self, outputs, targets):
-        """Task loss on the malignant head (native GMIC deep-supervised BCE + L1).
-
-        `loss=gmic`/`gmic_bce`: BCEWithLogits(fusion)+BCE(global)+BCE(local)+lambda_l1*L1,
-            malignant channel, shared pos_weight.
-        `loss=focal`: same 3-head + L1 structure with FOCAL BCE (focal_gamma/focal_alpha).
-        `loss=cross_entropy`/`ce`: legacy CrossEntropyLoss on the fusion logits.
-        """
-        name = (getattr(self, "loss_name", "gmic") or "gmic").lower()
-        if name == "focal":
-            return gmic_focal_loss(
-                outputs, targets, lambda_l1=self.lambda_l1,
-                gamma=self.focal_gamma, alpha=self.focal_alpha,
-            )
-        if name in ("gmic", "gmic_bce"):
-            return gmic_malignant_loss(
-                outputs, targets, lambda_l1=self.lambda_l1, pos_weight=self.pos_weight
-            )
-        fusion_logits = outputs[0] if isinstance(outputs, (tuple, list)) else outputs
-        return self.criterion(fusion_logits, targets)
+        """Task loss on the malignant head: native GMIC deep-supervised BCE + L1
+        (BCEWithLogits(fusion) + BCE(global) + BCE(local) + lambda_l1*L1, malignant
+        channel, shared pos_weight)."""
+        return gmic_malignant_loss(
+            outputs, targets, lambda_l1=self.lambda_l1, pos_weight=self.pos_weight
+        )
 
 
     def _apply_backbone_freeze(self, fl_ctx, frozen: bool):

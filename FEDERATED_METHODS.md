@@ -57,8 +57,8 @@ now raises (single source of truth). λ grid: `lambda_global∈{1,5,10} × lambd
   start; check it against the intended config.
 - **`val_split`/`test_split` are IGNORED when `use_predefined_splits=true`** (the default). Splits
   come from the CSV `split_group` column; the two ratios only apply in the random-split fallback.
-- **`loss` valid values: `gmic`/`gmic_bce` (the real loss) or legacy `cross_entropy`/`ce`.** Any
-  other value (including plain `bce`) raises at init — no silent fallback.
+- **`loss` has one valid value: `gmic`** (the native GMIC deep-supervised malignant BCE + L1;
+  computed in `_compute_task_loss`). Any other value raises at init — no silent fallback.
 - Removed dead config keys (no effect, were misleading): `optimizer` block (top-level
   `lr_heads`/`lr_backbone`/`weight_decay` are the live source), `pretrained_model_index`,
   `load_checkpoint`, `gmic_parameters.gpu_number`, `results_dir` (dumps go to `output_dir`).
