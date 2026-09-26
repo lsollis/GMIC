@@ -116,20 +116,22 @@ class GMICFederatedExecutor(Executor):
 
     def __init__(
             self,
-            epochs: int = 50,
-            patience: int = 4,
-            lr_heads: float = 1e-4,
-            lr_backbone: float = 1e-5,
-            weight_decay: float = 1e-5,
-            batch_size: int = 128,
-            data_path: str = "/workspace/data/gmic_format_xai.csv",
+            # Defaults reflect the recipe used in the paper's runs (1 epoch/round, backbone-
+            # trained). A job config overrides any of these; see the per-method configs.
+            epochs: int = 1,                      # FL: 1 local epoch per round
+            patience: int = 6,
+            lr_heads: float = 3e-5,
+            lr_backbone: float = 3e-7,
+            weight_decay: float = 1e-6,
+            batch_size: int = 32,
+            data_path: str | None = None,         # single-site/centralized CSV; else use data_path_map
             data_path_map: dict | None = None,    # {client_identity: csv_path}; per-client CSV from one config
-            image_path: str = "/workspace/data/XAI_output",
+            image_path: str = "/workspace/data",
             model_path: str = "/workspace/models/sample_model_5.p",
             device: str = "cuda:0" if torch.cuda.is_available() else "cpu",
             input_format: str = "csv",
             enable_preprocessing: bool = True,
-            force_preprocessing: bool = True,
+            force_preprocessing: bool = False,    # re-crop only when explicitly requested
             cache_validation: bool = True,
             use_predefined_splits: bool = True,
             val_split: float = 0.15,
