@@ -4,7 +4,7 @@
   "task_result_filters": [],
   "workflows": [
     {
-      "id": "fedprox_sim",
+      "id": "centralized",
       "path": "nvflare.app_common.workflows.fedavg.FedAvg",
       "args": {
         "num_clients": 1,
